@@ -363,3 +363,16 @@ class AlphaCtxN:
         if isinstance(df_long, pd.Series):
             return df_long.unstack("asset").sort_index()
         return df_long.unstack("asset").sort_index()
+
+def test(prices, sentiment):
+    # prices: long DataFrame (date, asset) with open/high/low/close/volume
+    # sentiment: long Series (date, asset)
+    A = AlphaCtx
+    ctxN = AlphaCtxN(prices, sentiment)
+    
+    alphas_df = ctxN.evaluate_all(A, dropna=True)     # (date, asset) x alpha1..alpha71
+    fwd_ret    = ctxN.make_forward_returns(horizon=1) # (date, asset) Series
+    
+    # (Optional) standardize cross-section and run checks using helpers you already have:
+    sanity = A.sanity_check(alphas_df)
+    alphas_std = A.standardize_cross_section(alphas_df, winsor=(0.01,0.99), clip_z=5.0, by_group=None, exposures=None)

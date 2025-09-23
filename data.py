@@ -171,4 +171,21 @@ def information_coefficient(alphas_df: pd.DataFrame, fwd_ret: pd.Series, method=
     return per_date.mean(axis=0).sort_values(ascending=False)
 
 def test():
-  
+      # alphas_df: rows = (date, asset) multiindex or just date if already screened to a universe per day
+    # simplest: index = date, one row PER ASSET per date, with columns alpha1..alpha71
+    
+    report = sanity_check(alphas_df)
+    print(report.head(10))
+    
+    # industry neutralized, winsorized, z-scored:
+    std_df = standardize_cross_section(
+        alphas_df,
+        winsor=(0.01, 0.99),
+        by_group=industry_series,      # pd.Series of industry codes per row (or None)
+        exposures=None,                # or a DataFrame like pd.DataFrame({"beta": mkt_beta, "size": ln_mcap})
+    )
+    
+    # Optional: quick IC snapshot against next-day returns
+    ic = information_coefficient(std_df, fwd_ret=next_day_returns, method="spearman")
+    print(ic.head(15))
+

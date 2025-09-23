@@ -2,6 +2,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass
+from typing import Iterator, Tuple
 
 EPS = 1e-12
 
@@ -272,3 +273,93 @@ def evaluate_all(ctx: AlphaCtx, dropna: bool = False) -> pd.DataFrame:
     out = {name: fn(ctx) for name, fn in ALPHA_FUNCS.items()}
     df = pd.DataFrame(out, index=ctx.c.index)
     return df.dropna() if dropna else df
+
+# alphactx_multi.py
+class AlphaCtxN:
+    """
+    Multi-asset adapter around your single-asset AlphaCtx/evaluate_all pipeline.
+
+    Inputs (long format):
+      prices   : DataFrame indexed by (date, asset), cols=['open','high','low','close','volume']
+      sentiment: Series   indexed by (date, asset)
+
+    Usage:
+      import your_alpha_module as A   # where AlphaCtx, evaluate_all live
+      ctxN = AlphaCtxN(prices, sentiment)
+      alphas_df = ctxN.evaluate_all(A, dropna=True)   # long-format (date, asset) x alpha1..alpha71
+    """
+    def __init__(self, prices: pd.DataFrame, sentiment: pd.Series):
+        if not isinstance(prices.index, pd.MultiIndex) or prices.index.nlevels < 2:
+            raise ValueError("prices must be indexed by (date, asset)")
+        if not isinstance(sentiment.index, pd.MultiIndex) or sentiment.index.nlevels < 2:
+            raise ValueError("sentiment must be indexed by (date, asset)")
+        req = {"open", "high", "low", "close", "volume"}
+        missing = req - set(prices.columns)
+        if missing:
+            raise ValueError(f"prices missing columns: {missing}")
+
+        # align and sort
+        idx = prices.index.intersection(sentiment.index)
+        self.prices = prices.loc[idx].sort_index()
+        self.sentiment = sentiment.loc[idx].sort_index().rename("s")
+
+    def iter_asset_ctxs(self, eval_module) -> Iterator[Tuple[str, "eval_module.AlphaCtx"]]:
+        """
+        Yields (asset, prepared AlphaCtx) for each asset present in the input.
+        """
+        for asset, df_a in self.prices.groupby(level=1, sort=True):
+            s_a = self.sentiment.xs(asset, level=1, drop_level=False)
+            s_a = s_a.droplevel(1)  # -> index=dates
+            # ensure sentiment is aligned to this asset's dates
+            s_a = s_a.reindex(df_a.index.get_level_values(0))
+
+            # build single-asset ctx using your module's AlphaCtx and prepare it
+            ctx = eval_module.AlphaCtx(
+                c=df_a["close"].droplevel(1),
+                o=df_a["open"].droplevel(1),
+                v=df_a["volume"].droplevel(1),
+                s=s_a,
+                h=df_a["high"].droplevel(1),
+                l=df_a["low"].droplevel(1),
+            ).prepare()
+            yield asset, ctx
+
+    def evaluate_all(self, eval_module, dropna: bool = True) -> pd.DataFrame:
+        """
+        Runs your module's evaluate_all(ctx) for each asset and concatenates results.
+
+        Returns:
+          DataFrame indexed by (date, asset), with columns alpha1..alpha71
+        """
+        frames = []
+        for asset, ctx in self.iter_asset_ctxs(eval_module=eval_module):
+            A = eval_module.evaluate_all(ctx, dropna=False)
+            A["asset"] = asset
+            A["date"] = A.index
+            frames.append(A.set_index(["date", "asset"]).sort_index())
+
+        if not frames:
+            return pd.DataFrame()
+
+        out = pd.concat(frames).sort_index()
+        return out.dropna() if dropna else out
+
+    # Convenience helpers that mirror what we added earlier
+    def make_forward_returns(self, horizon: int = 1) -> pd.Series:
+        """
+        Forward returns R_{t->t+h} per asset from close, long format index (date, asset).
+        """
+        close = self.prices["close"]
+        # close has (date, asset) index; group by asset and shift
+        fwd = close.groupby(level=1).apply(lambda s: s.shift(-horizon) / s - 1.0)
+        if isinstance(fwd.index, pd.MultiIndex) and fwd.index.nlevels == 3:
+            fwd.index = fwd.index.droplevel(0)
+        return fwd.rename(f"fwd_ret_h{horizon}")
+
+    def to_wide(self, df_long: pd.DataFrame | pd.Series) -> pd.DataFrame:
+        """
+        Utility: convert long (date, asset) to wide (date x asset).
+        """
+        if isinstance(df_long, pd.Series):
+            return df_long.unstack("asset").sort_index()
+        return df_long.unstack("asset").sort_index()

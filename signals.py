@@ -374,5 +374,6 @@ def test(prices, sentiment):
     fwd_ret    = ctxN.make_forward_returns(horizon=1) # (date, asset) Series
     
     # (Optional) standardize cross-section and run checks using helpers you already have:
-    sanity = A.sanity_check(alphas_df)
-    alphas_std = A.standardize_cross_section(alphas_df, winsor=(0.01,0.99), clip_z=5.0, by_group=None, exposures=None)
+    from . import data
+    sanity = data.sanity_check(alphas_df)
+    alphas_std = data.standardize_cross_section(alphas_df, winsor=(0.01,0.99), clip_z=5.0, by_group=None, exposures=None)

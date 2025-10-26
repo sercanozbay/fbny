@@ -182,7 +182,6 @@ class Backtester:
     def _initialize_portfolio(self, start_date: pd.Timestamp):
         """Initialize portfolio state."""
         prices_data = self.data_manager.load_prices()
-        print(prices_data.index, type(start_date))
         start_prices = prices_data.loc[start_date].to_dict()
 
         initial_positions = self.config.initial_positions or {}

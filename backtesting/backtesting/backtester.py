@@ -208,6 +208,14 @@ class Backtester:
         self.state.net_exposures.append(portfolio.get_net_exposure())
         self.state.factor_exposures.append({})  # Empty dict for initial state
 
+        # PnL breakdown for initial state
+        self.state.external_trade_pnl.append(0.0)
+        self.state.executed_trade_pnl.append(0.0)
+        self.state.overnight_pnl.append(0.0)
+
+        # Track previous prices for overnight PnL calculation
+        self.prev_prices = None
+
     def _simulate_day(
         self,
         date: pd.Timestamp,
@@ -230,7 +238,15 @@ class Backtester:
         factor_loadings = day_data.get('factor_exposures')
         factor_returns = day_data.get('factor_returns', {})
 
-        # Determine target positions based on use case
+        # Handle use case 3 with PnL breakdown
+        if use_case == 3:
+            self._simulate_day_use_case_3(
+                date, inputs, prices, adv, betas, sector_mapping,
+                factor_loadings, factor_returns, day_data
+            )
+            return
+
+        # Determine target positions for use cases 1 and 2
         if use_case == 1:
             target_positions = self._process_use_case_1(
                 date, inputs, prices
@@ -238,10 +254,6 @@ class Backtester:
         elif use_case == 2:
             target_positions = self._process_use_case_2(
                 date, inputs, prices
-            )
-        elif use_case == 3:
-            target_positions = self._process_use_case_3(
-                date, inputs, prices, adv, factor_loadings
             )
         else:
             raise ValueError(f"Invalid use case: {use_case}")
@@ -264,6 +276,14 @@ class Backtester:
         # Apply ADV constraints
         constrained_trades, _ = self.adv_calculator.apply_constraints(trades, adv)
 
+        # Calculate overnight PnL (holding returns)
+        overnight_pnl = 0.0
+        if self.prev_prices is not None:
+            for ticker, shares in self.state.portfolio.positions.items():
+                prev_px = self.prev_prices.get(ticker, 0.0)
+                curr_px = prices.get(ticker, 0.0)
+                overnight_pnl += shares * (curr_px - prev_px)
+
         # Execute trades
         trade_prices = day_data.get('trade_prices')
         new_portfolio, total_cost, trade_records = self.executor.execute_trades(
@@ -274,6 +294,16 @@ class Backtester:
             adv,
             date
         )
+
+        # Calculate executed trade PnL (difference between execution and close)
+        executed_pnl = 0.0
+        if trade_prices and self.config.use_trade_prices:
+            for ticker, qty in constrained_trades.items():
+                exec_px = trade_prices.get(ticker, prices.get(ticker, 0.0))
+                close_px = prices.get(ticker, 0.0)
+                executed_pnl += qty * (close_px - exec_px)
+
+        external_pnl = 0.0  # No external trades in use cases 1 and 2
 
         # Calculate attribution and factor exposures if factor data available
         if factor_loadings is not None and factor_returns:
@@ -307,10 +337,19 @@ class Backtester:
             except:
                 pass  # Skip if error
 
-        # Update state
-        self.state.update(new_portfolio, total_cost)
+        # Update state with PnL breakdown
+        self.state.update(
+            new_portfolio,
+            tc=total_cost,
+            external_pnl=external_pnl,
+            executed_pnl=executed_pnl,
+            overnight_pnl=overnight_pnl
+        )
         self.state.add_trades(trade_records)
         self.state.factor_exposures.append(factor_exp_dict)
+
+        # Update previous prices for next day
+        self.prev_prices = prices
 
     def _process_use_case_1(
         self,
@@ -422,6 +461,153 @@ class Backtester:
 
         return new_positions
 
+    def _simulate_day_use_case_3(
+        self,
+        date: pd.Timestamp,
+        inputs: Dict,
+        prices: Dict[str, float],
+        adv: Dict[str, float],
+        betas: Dict[str, float],
+        sector_mapping: Dict[str, str],
+        factor_loadings: Optional[pd.DataFrame],
+        factor_returns: Dict[str, float],
+        day_data: Dict
+    ):
+        """
+        Simulate day for use case 3 with external trades and PnL breakdown.
+
+        This method handles external trades with their own execution prices
+        and separates PnL into external, executed, and overnight components.
+        """
+        external_trades_by_date = inputs.get('external_trades', {})
+        external_exec_prices_by_date = inputs.get('external_exec_prices', {})
+
+        # Get external trades and their execution prices
+        external_trades = external_trades_by_date.get(date, {})
+        external_exec_prices = external_exec_prices_by_date.get(date, None)
+
+        # Apply external trades to get intermediate positions
+        if external_trades:
+            positions_after_external = self.external_processor.apply_external_trades(
+                self.state.portfolio.positions, external_trades
+            )
+        else:
+            positions_after_external = self.state.portfolio.positions.copy()
+
+        # Check if optimization is needed
+        needs_optimization = (
+            self.config.max_portfolio_variance is not None or
+            self.config.max_factor_exposure is not None
+        )
+
+        # Calculate optimal trades (internal rebalancing)
+        internal_trades = {}
+        if needs_optimization and factor_loadings is not None:
+            try:
+                factor_cov = self.data_manager.load_factor_covariance().values
+                specific_var_data = self.data_manager.load_specific_variance()
+                specific_var = specific_var_data.loc[date].to_dict() if date in specific_var_data.index else {}
+
+                optimal_trades, _ = self.portfolio_optimizer.optimize_trades(
+                    positions_after_external,
+                    prices,
+                    adv,
+                    factor_loadings,
+                    factor_cov,
+                    specific_var,
+                    max_variance=self.config.max_portfolio_variance,
+                    max_factor_exposure=self.config.max_factor_exposure,
+                    max_adv_participation=self.config.max_adv_participation
+                )
+                internal_trades = optimal_trades
+            except Exception as e:
+                print(f"Warning: Optimization failed on {date}: {e}")
+
+        # Apply hedging to internal trades if needed
+        target_positions = positions_after_external.copy()
+        for ticker, trade_qty in internal_trades.items():
+            target_positions[ticker] = target_positions.get(ticker, 0.0) + trade_qty
+
+        if self.beta_hedger and betas:
+            target_positions, _ = self.beta_hedger.apply_hedge(
+                target_positions, prices, betas
+            )
+
+        if self.sector_hedger and sector_mapping:
+            target_positions, _ = self.sector_hedger.apply_hedge(
+                target_positions, prices, sector_mapping
+            )
+
+        # Recalculate internal trades after hedging
+        from .utils import calculate_trades
+        internal_trades = calculate_trades(positions_after_external, target_positions)
+
+        # Apply ADV constraints to internal trades
+        internal_trades, _ = self.adv_calculator.apply_constraints(internal_trades, adv)
+
+        # Get internal execution prices
+        trade_prices = day_data.get('trade_prices')
+        internal_exec_prices = trade_prices if self.config.use_trade_prices else None
+
+        # Execute all trades with breakdown
+        new_portfolio, total_cost, trade_records, pnl_breakdown = \
+            self.executor.execute_trades_with_breakdown(
+                self.state.portfolio,
+                external_trades,
+                internal_trades,
+                prices,
+                external_exec_prices,
+                internal_exec_prices,
+                adv,
+                date,
+                prev_close_prices=self.prev_prices
+            )
+
+        # Calculate attribution if factor data available
+        if factor_loadings is not None and factor_returns:
+            try:
+                factor_pnl, specific_pnl, _, _ = self.attributor.calculate_total_attribution(
+                    self.state.portfolio.positions,
+                    self.state.portfolio.prices,
+                    prices,
+                    factor_loadings,
+                    factor_returns
+                )
+                self.attribution_tracker.add_period(date, factor_pnl, specific_pnl)
+            except:
+                pass
+
+        # Calculate factor exposures for new portfolio
+        factor_exp_dict = {}
+        if factor_loadings is not None:
+            try:
+                factor_exp_array = self.risk_model.calculate_factor_exposures(
+                    new_portfolio.positions,
+                    prices,
+                    factor_loadings
+                )
+                factor_names = factor_loadings.columns.tolist()
+                factor_exp_dict = {
+                    factor_names[i]: float(factor_exp_array[i])
+                    for i in range(len(factor_names))
+                }
+            except:
+                pass
+
+        # Update state with PnL breakdown
+        self.state.update(
+            new_portfolio,
+            tc=total_cost,
+            external_pnl=pnl_breakdown['external'],
+            executed_pnl=pnl_breakdown['executed'],
+            overnight_pnl=pnl_breakdown['overnight']
+        )
+        self.state.add_trades(trade_records)
+        self.state.factor_exposures.append(factor_exp_dict)
+
+        # Update previous prices for next day
+        self.prev_prices = prices
+
     def _create_results(self) -> BacktestResults:
         """Create results object from state."""
         return BacktestResults(
@@ -435,5 +621,8 @@ class Backtester:
             trades=self.state.trades,
             attribution_tracker=self.attribution_tracker,
             risk_free_rate=self.config.risk_free_rate,
-            factor_exposures=self.state.factor_exposures
+            factor_exposures=self.state.factor_exposures,
+            external_trade_pnl=self.state.external_trade_pnl,
+            executed_trade_pnl=self.state.executed_trade_pnl,
+            overnight_pnl=self.state.overnight_pnl
         )

@@ -11,6 +11,11 @@ from .backtester import Backtester
 from .config import BacktestConfig, ReportConfig, Portfolio, BacktestState
 from .data_loader import DataManager
 from .results import BacktestResults
+from .trade_generator import (
+    ExternalTradeGenerator,
+    TradeGeneratorConfig,
+    generate_external_trades_from_signals
+)
 
 __all__ = [
     'Backtester',
@@ -19,5 +24,8 @@ __all__ = [
     'Portfolio',
     'BacktestState',
     'DataManager',
-    'BacktestResults'
+    'BacktestResults',
+    'ExternalTradeGenerator',
+    'TradeGeneratorConfig',
+    'generate_external_trades_from_signals'
 ]

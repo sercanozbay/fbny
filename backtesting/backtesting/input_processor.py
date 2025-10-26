@@ -318,7 +318,7 @@ class ExternalTradesProcessor:
     def apply_external_trades(
         self,
         current_positions: Dict[str, float],
-        external_trades: Dict[str, float]
+        external_trades: Dict[str, List[Dict]]
     ) -> Dict[str, float]:
         """
         Apply external trades to current positions.
@@ -327,8 +327,9 @@ class ExternalTradesProcessor:
         -----------
         current_positions : Dict[str, float]
             Current holdings
-        external_trades : Dict[str, float]
+        external_trades : Dict[str, List[Dict]]
             External trades to apply
+            Format: {ticker: [{'qty': shares, 'price': price}, ...], ...}
 
         Returns:
         --------
@@ -337,8 +338,16 @@ class ExternalTradesProcessor:
         """
         new_positions = current_positions.copy()
 
-        for ticker, trade_qty in external_trades.items():
-            new_positions[ticker] = new_positions.get(ticker, 0.0) + trade_qty
+        for ticker, trade_list in external_trades.items():
+            if not isinstance(trade_list, list):
+                raise ValueError(
+                    f"External trades must be a list of dicts with 'qty' and 'price'. "
+                    f"Got {type(trade_list)} for {ticker}"
+                )
+
+            # Sum up all trades for this ticker
+            total_qty = sum(trade.get('qty', 0) for trade in trade_list)
+            new_positions[ticker] = new_positions.get(ticker, 0.0) + total_qty
 
         # Remove zero positions
         new_positions = {

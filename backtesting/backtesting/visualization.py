@@ -484,6 +484,261 @@ class BacktestVisualizer:
         else:
             plt.show()
 
+    def plot_pnl_breakdown(
+        self,
+        dates: List[pd.Timestamp],
+        external_pnl: List[float],
+        executed_pnl: List[float],
+        overnight_pnl: List[float],
+        save_path: Optional[str] = None
+    ):
+        """
+        Plot stacked area chart of PnL breakdown.
+
+        Parameters:
+        -----------
+        dates : List[pd.Timestamp]
+            Dates
+        external_pnl : List[float]
+            External trade PnL
+        executed_pnl : List[float]
+            Executed trade PnL
+        overnight_pnl : List[float]
+            Overnight PnL
+        save_path : str, optional
+            Path to save figure
+        """
+        fig, axes = plt.subplots(2, 1, figsize=(12, 10))
+
+        # Cumulative PnL breakdown (stacked area)
+        cum_external = np.cumsum(external_pnl)
+        cum_executed = np.cumsum(executed_pnl)
+        cum_overnight = np.cumsum(overnight_pnl)
+
+        axes[0].plot(dates, cum_external, label='External Trades', linewidth=2, color='#2E86AB')
+        axes[0].plot(dates, cum_executed, label='Executed Trades', linewidth=2, color='#A23B72')
+        axes[0].plot(dates, cum_overnight, label='Overnight', linewidth=2, color='#F18F01')
+        axes[0].plot(dates, cum_external + cum_executed + cum_overnight,
+                     label='Total', linewidth=2.5, color='black', linestyle='--')
+
+        axes[0].axhline(y=0, color='gray', linestyle='-', alpha=0.3, linewidth=1)
+        axes[0].set_title('Cumulative PnL Breakdown', fontsize=14, fontweight='bold')
+        axes[0].set_ylabel('Cumulative PnL ($)', fontsize=12)
+        axes[0].legend(loc='best', fontsize=10)
+        axes[0].grid(True, alpha=0.3)
+
+        # Daily PnL breakdown (stacked bar)
+        width = 0.8
+        x = np.arange(len(dates))
+
+        # Create stacked bar chart
+        bars1 = axes[1].bar(x, external_pnl, width, label='External Trades',
+                           color='#2E86AB', alpha=0.8)
+        bars2 = axes[1].bar(x, executed_pnl, width, label='Executed Trades',
+                           bottom=external_pnl, color='#A23B72', alpha=0.8)
+
+        bottom_vals = [e + x for e, x in zip(external_pnl, executed_pnl)]
+        bars3 = axes[1].bar(x, overnight_pnl, width, label='Overnight',
+                           bottom=bottom_vals, color='#F18F01', alpha=0.8)
+
+        axes[1].axhline(y=0, color='gray', linestyle='-', alpha=0.3, linewidth=1)
+        axes[1].set_title('Daily PnL Breakdown', fontsize=14, fontweight='bold')
+        axes[1].set_ylabel('Daily PnL ($)', fontsize=12)
+        axes[1].set_xlabel('Date', fontsize=12)
+        axes[1].legend(loc='best', fontsize=10)
+        axes[1].grid(True, alpha=0.3, axis='y')
+
+        # Format x-axis for lower plot only
+        if len(dates) > 50:
+            # Show fewer dates if too many
+            step = len(dates) // 10
+            axes[1].set_xticks(x[::step])
+            axes[1].set_xticklabels([d.strftime('%Y-%m-%d') for d in dates[::step]],
+                                   rotation=45, ha='right')
+        else:
+            axes[1].set_xticks(x)
+            axes[1].set_xticklabels([d.strftime('%Y-%m-%d') for d in dates],
+                                   rotation=45, ha='right')
+
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=self.dpi, bbox_inches='tight')
+            plt.close()
+        else:
+            plt.show()
+
+    def plot_external_trades_analysis(
+        self,
+        trades_df: pd.DataFrame,
+        save_path: Optional[str] = None
+    ):
+        """
+        Plot external trades analysis (volume, count, execution).
+
+        Parameters:
+        -----------
+        trades_df : pd.DataFrame
+            DataFrame with external trades
+        save_path : str, optional
+            Path to save figure
+        """
+        if trades_df.empty or 'type' not in trades_df.columns:
+            print("No external trades to plot")
+            return
+
+        external_trades = trades_df[trades_df['type'] == 'external'].copy()
+
+        if external_trades.empty:
+            print("No external trades to plot")
+            return
+
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+        # 1. Trade count by ticker
+        ticker_counts = external_trades['ticker'].value_counts().head(15)
+        axes[0, 0].barh(range(len(ticker_counts)), ticker_counts.values, color='#2E86AB')
+        axes[0, 0].set_yticks(range(len(ticker_counts)))
+        axes[0, 0].set_yticklabels(ticker_counts.index)
+        axes[0, 0].set_xlabel('Number of Trades', fontsize=11)
+        axes[0, 0].set_title('Trade Count by Ticker (Top 15)', fontsize=12, fontweight='bold')
+        axes[0, 0].grid(True, alpha=0.3, axis='x')
+
+        # 2. Total notional by ticker
+        external_trades['notional'] = abs(external_trades['quantity'] * external_trades['price'])
+        ticker_notional = external_trades.groupby('ticker')['notional'].sum().sort_values(ascending=False).head(15)
+        axes[0, 1].barh(range(len(ticker_notional)), ticker_notional.values / 1e6, color='#A23B72')
+        axes[0, 1].set_yticks(range(len(ticker_notional)))
+        axes[0, 1].set_yticklabels(ticker_notional.index)
+        axes[0, 1].set_xlabel('Total Notional ($M)', fontsize=11)
+        axes[0, 1].set_title('Total Notional by Ticker (Top 15)', fontsize=12, fontweight='bold')
+        axes[0, 1].grid(True, alpha=0.3, axis='x')
+
+        # 3. Daily trade volume
+        external_trades['date_only'] = pd.to_datetime(external_trades['date']).dt.date
+        daily_notional = external_trades.groupby('date_only')['notional'].sum()
+        axes[1, 0].bar(range(len(daily_notional)), daily_notional.values / 1e6,
+                      color='#F18F01', alpha=0.8)
+        axes[1, 0].set_xlabel('Date', fontsize=11)
+        axes[1, 0].set_ylabel('Notional ($M)', fontsize=11)
+        axes[1, 0].set_title('Daily Trade Volume', fontsize=12, fontweight='bold')
+        axes[1, 0].grid(True, alpha=0.3, axis='y')
+
+        # Format x-axis
+        if len(daily_notional) > 20:
+            step = len(daily_notional) // 10
+            xticks = range(0, len(daily_notional), step)
+            axes[1, 0].set_xticks(xticks)
+            axes[1, 0].set_xticklabels([str(daily_notional.index[i]) for i in xticks],
+                                       rotation=45, ha='right')
+        else:
+            axes[1, 0].set_xticks(range(len(daily_notional)))
+            axes[1, 0].set_xticklabels([str(d) for d in daily_notional.index],
+                                       rotation=45, ha='right')
+
+        # 4. Trade costs
+        ticker_costs = external_trades.groupby('ticker')['cost'].sum().sort_values(ascending=False).head(15)
+        axes[1, 1].barh(range(len(ticker_costs)), ticker_costs.values, color='#C73E1D')
+        axes[1, 1].set_yticks(range(len(ticker_costs)))
+        axes[1, 1].set_yticklabels(ticker_costs.index)
+        axes[1, 1].set_xlabel('Total Cost ($)', fontsize=11)
+        axes[1, 1].set_title('Transaction Costs by Ticker (Top 15)', fontsize=12, fontweight='bold')
+        axes[1, 1].grid(True, alpha=0.3, axis='x')
+
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=self.dpi, bbox_inches='tight')
+            plt.close()
+        else:
+            plt.show()
+
+    def plot_execution_quality(
+        self,
+        execution_analysis: pd.DataFrame,
+        save_path: Optional[str] = None
+    ):
+        """
+        Plot execution quality analysis.
+
+        Parameters:
+        -----------
+        execution_analysis : pd.DataFrame
+            DataFrame from get_execution_quality_analysis()
+        save_path : str, optional
+            Path to save figure
+        """
+        if execution_analysis.empty:
+            print("No execution quality data to plot")
+            return
+
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+        # Sort by total notional
+        df = execution_analysis.copy()
+        df['abs_notional'] = abs(df['total_qty'] * df['vwap'])
+        df = df.sort_values('abs_notional', ascending=False).head(20)
+
+        # 1. Slippage by ticker
+        colors = ['green' if s > 0 else 'red' for s in df['slippage_pct']]
+        axes[0, 0].barh(range(len(df)), df['slippage_pct'].values, color=colors, alpha=0.7)
+        axes[0, 0].set_yticks(range(len(df)))
+        axes[0, 0].set_yticklabels(df['ticker'].values)
+        axes[0, 0].axvline(x=0, color='black', linestyle='-', linewidth=1)
+        axes[0, 0].set_xlabel('Slippage (%)', fontsize=11)
+        axes[0, 0].set_title('Execution Slippage by Ticker (Top 20)', fontsize=12, fontweight='bold')
+        axes[0, 0].grid(True, alpha=0.3, axis='x')
+
+        # 2. VWAP vs Close Price
+        x = np.arange(len(df))
+        width = 0.35
+        axes[0, 1].bar(x - width/2, df['vwap'].values, width, label='VWAP',
+                      color='#2E86AB', alpha=0.8)
+        axes[0, 1].bar(x + width/2, df['avg_close'].values, width, label='Avg Close',
+                      color='#A23B72', alpha=0.8)
+        axes[0, 1].set_xticks(x)
+        axes[0, 1].set_xticklabels(df['ticker'].values, rotation=45, ha='right')
+        axes[0, 1].set_ylabel('Price ($)', fontsize=11)
+        axes[0, 1].set_title('VWAP vs Average Close Price', fontsize=12, fontweight='bold')
+        axes[0, 1].legend(loc='best')
+        axes[0, 1].grid(True, alpha=0.3, axis='y')
+
+        # 3. Execution PnL by ticker
+        colors = ['green' if p > 0 else 'red' for p in df['execution_pnl']]
+        axes[1, 0].barh(range(len(df)), df['execution_pnl'].values, color=colors, alpha=0.7)
+        axes[1, 0].set_yticks(range(len(df)))
+        axes[1, 0].set_yticklabels(df['ticker'].values)
+        axes[1, 0].axvline(x=0, color='black', linestyle='-', linewidth=1)
+        axes[1, 0].set_xlabel('Execution PnL ($)', fontsize=11)
+        axes[1, 0].set_title('Execution PnL by Ticker', fontsize=12, fontweight='bold')
+        axes[1, 0].grid(True, alpha=0.3, axis='x')
+
+        # 4. Slippage vs Trade Size
+        abs_qty = abs(df['total_qty'])
+        colors_scatter = ['green' if s > 0 else 'red' for s in df['slippage_pct']]
+        axes[1, 1].scatter(abs_qty, df['slippage_pct'], c=colors_scatter,
+                          alpha=0.6, s=100, edgecolors='black', linewidth=0.5)
+        axes[1, 1].axhline(y=0, color='black', linestyle='-', linewidth=1)
+        axes[1, 1].set_xlabel('Total Quantity (shares)', fontsize=11)
+        axes[1, 1].set_ylabel('Slippage (%)', fontsize=11)
+        axes[1, 1].set_title('Slippage vs Trade Size', fontsize=12, fontweight='bold')
+        axes[1, 1].grid(True, alpha=0.3)
+
+        # Add annotations for extreme slippage
+        for idx, row in df.iterrows():
+            if abs(row['slippage_pct']) > df['slippage_pct'].std() * 2:
+                axes[1, 1].annotate(row['ticker'],
+                                   (abs(row['total_qty']), row['slippage_pct']),
+                                   fontsize=8, alpha=0.7)
+
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=self.dpi, bbox_inches='tight')
+            plt.close()
+        else:
+            plt.show()
+
     def create_all_charts(
         self,
         dates: List[pd.Timestamp],
@@ -494,7 +749,12 @@ class BacktestVisualizer:
         transaction_costs: List[float],
         factor_pnl_df: Optional[pd.DataFrame],
         output_dir: str,
-        factor_exposures: Optional[List[Dict[str, float]]] = None
+        factor_exposures: Optional[List[Dict[str, float]]] = None,
+        external_trade_pnl: Optional[List[float]] = None,
+        executed_trade_pnl: Optional[List[float]] = None,
+        overnight_pnl: Optional[List[float]] = None,
+        trades_df: Optional[pd.DataFrame] = None,
+        close_prices: Optional[pd.DataFrame] = None
     ):
         """
         Create all standard charts and save to directory.
@@ -519,6 +779,16 @@ class BacktestVisualizer:
             Directory to save charts
         factor_exposures : List[Dict[str, float]], optional
             Factor exposures over time
+        external_trade_pnl : List[float], optional
+            External trade PnL (use case 3)
+        executed_trade_pnl : List[float], optional
+            Executed trade PnL (use case 3)
+        overnight_pnl : List[float], optional
+            Overnight PnL (use case 3)
+        trades_df : pd.DataFrame, optional
+            Trades DataFrame for external trade analysis
+        close_prices : pd.DataFrame, optional
+            Close prices for execution quality analysis
         """
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
@@ -572,4 +842,96 @@ class BacktestVisualizer:
                 save_path=str(output_path / 'factor_exposures_heatmap.png')
             )
 
+        # External trade charts (use case 3)
+        has_external_pnl = (external_trade_pnl is not None and
+                           any(abs(p) > 1e-6 for p in external_trade_pnl))
+
+        if has_external_pnl and executed_trade_pnl is not None and overnight_pnl is not None:
+            self.plot_pnl_breakdown(
+                dates, external_trade_pnl, executed_trade_pnl, overnight_pnl,
+                save_path=str(output_path / 'pnl_breakdown.png')
+            )
+
+        if trades_df is not None and not trades_df.empty and 'type' in trades_df.columns:
+            external_trades = trades_df[trades_df['type'] == 'external']
+            if not external_trades.empty:
+                self.plot_external_trades_analysis(
+                    trades_df,
+                    save_path=str(output_path / 'external_trades_analysis.png')
+                )
+
+                # Execution quality analysis (requires close prices)
+                if close_prices is not None:
+                    from .results import BacktestResults
+                    # Create a temporary results object to use analysis method
+                    temp_results = type('obj', (object,), {
+                        'trades': trades_df.to_dict('records'),
+                        'get_trades_dataframe': lambda: trades_df,
+                        'get_execution_quality_analysis': lambda cp: self._get_execution_quality_analysis(trades_df, cp)
+                    })()
+
+                    execution_analysis = self._get_execution_quality_analysis(trades_df, close_prices)
+                    if not execution_analysis.empty:
+                        self.plot_execution_quality(
+                            execution_analysis,
+                            save_path=str(output_path / 'execution_quality.png')
+                        )
+
         print(f"Charts saved to {output_dir}")
+
+    def _get_execution_quality_analysis(self, trades_df: pd.DataFrame, close_prices: pd.DataFrame) -> pd.DataFrame:
+        """Helper method for execution quality analysis."""
+        if trades_df.empty or 'type' not in trades_df.columns:
+            return pd.DataFrame()
+
+        external_trades = trades_df[trades_df['type'] == 'external'].copy()
+
+        if external_trades.empty:
+            return pd.DataFrame()
+
+        results = []
+
+        for ticker in external_trades['ticker'].unique():
+            ticker_trades = external_trades[external_trades['ticker'] == ticker]
+
+            total_qty = ticker_trades['quantity'].sum()
+            vwap = (ticker_trades['quantity'] * ticker_trades['price']).sum() / total_qty
+
+            # Get weighted average close price for dates with trades
+            weighted_close = 0.0
+            for _, trade in ticker_trades.iterrows():
+                date = trade['date']
+                qty = trade['quantity']
+                if date in close_prices.index and ticker in close_prices.columns:
+                    close_px = close_prices.loc[date, ticker]
+                    weighted_close += abs(qty) * close_px
+
+            avg_close = weighted_close / abs(total_qty) if total_qty != 0 else 0.0
+
+            # Calculate slippage (positive = favorable execution)
+            if total_qty > 0:  # Net buyer
+                slippage = avg_close - vwap
+            else:  # Net seller
+                slippage = vwap - avg_close
+
+            slippage_pct = (slippage / avg_close * 100) if avg_close > 0 else 0.0
+
+            # Execution PnL from this ticker
+            ticker_pnl = ticker_trades.apply(
+                lambda row: row['quantity'] * (
+                    close_prices.loc[row['date'], ticker] - row['price']
+                ) if row['date'] in close_prices.index and ticker in close_prices.columns else 0.0,
+                axis=1
+            ).sum()
+
+            results.append({
+                'ticker': ticker,
+                'total_qty': total_qty,
+                'vwap': vwap,
+                'avg_close': avg_close,
+                'slippage': slippage,
+                'slippage_pct': slippage_pct,
+                'execution_pnl': ticker_pnl
+            })
+
+        return pd.DataFrame(results)

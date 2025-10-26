@@ -160,6 +160,11 @@ class BacktestState:
     daily_pnl: List[float] = field(default_factory=list)
     transaction_costs: List[float] = field(default_factory=list)
 
+    # PnL breakdown
+    external_trade_pnl: List[float] = field(default_factory=list)  # PnL from external trades
+    executed_trade_pnl: List[float] = field(default_factory=list)  # PnL from executed/optimized trades
+    overnight_pnl: List[float] = field(default_factory=list)       # PnL from price changes (holding returns)
+
     # Exposure tracking
     gross_exposures: List[float] = field(default_factory=list)
     net_exposures: List[float] = field(default_factory=list)
@@ -168,8 +173,30 @@ class BacktestState:
     # Trade tracking
     trades: List[Dict] = field(default_factory=list)  # List of trade records
 
-    def update(self, new_portfolio: Portfolio, tc: float = 0.0):
-        """Update state with new portfolio and record history."""
+    def update(
+        self,
+        new_portfolio: Portfolio,
+        tc: float = 0.0,
+        external_pnl: float = 0.0,
+        executed_pnl: float = 0.0,
+        overnight_pnl: float = 0.0
+    ):
+        """
+        Update state with new portfolio and record history.
+
+        Parameters:
+        -----------
+        new_portfolio : Portfolio
+            New portfolio state
+        tc : float
+            Transaction costs
+        external_pnl : float
+            PnL from external trades (use case 3)
+        executed_pnl : float
+            PnL from executed/optimized trades
+        overnight_pnl : float
+            PnL from overnight price changes
+        """
         old_value = self.portfolio.get_market_value()
         new_value = new_portfolio.get_market_value()
 
@@ -182,6 +209,11 @@ class BacktestState:
 
         pnl = new_value - old_value - tc
         self.daily_pnl.append(pnl)
+
+        # Store PnL components
+        self.external_trade_pnl.append(external_pnl)
+        self.executed_trade_pnl.append(executed_pnl)
+        self.overnight_pnl.append(overnight_pnl)
 
         if old_value > 0:
             daily_return = pnl / old_value

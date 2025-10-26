@@ -37,7 +37,10 @@ class BacktestResults:
         trades: List[Dict],
         attribution_tracker: Optional[AttributionTracker] = None,
         risk_free_rate: float = 0.0,
-        factor_exposures: Optional[List[Dict[str, float]]] = None
+        factor_exposures: Optional[List[Dict[str, float]]] = None,
+        external_trade_pnl: Optional[List[float]] = None,
+        executed_trade_pnl: Optional[List[float]] = None,
+        overnight_pnl: Optional[List[float]] = None
     ):
         """
         Initialize backtest results.
@@ -66,6 +69,12 @@ class BacktestResults:
             Risk-free rate for calculations
         factor_exposures : List[Dict[str, float]], optional
             Factor exposures over time
+        external_trade_pnl : List[float], optional
+            PnL from external trades (use case 3)
+        executed_trade_pnl : List[float], optional
+            PnL from executed/optimized trades
+        overnight_pnl : List[float], optional
+            PnL from overnight price changes
         """
         self.dates = dates
         self.portfolio_values = portfolio_values
@@ -77,6 +86,11 @@ class BacktestResults:
         self.trades = trades
         self.attribution_tracker = attribution_tracker
         self.factor_exposures = factor_exposures if factor_exposures is not None else []
+
+        # PnL breakdown
+        self.external_trade_pnl = external_trade_pnl if external_trade_pnl is not None else [0.0] * len(dates)
+        self.executed_trade_pnl = executed_trade_pnl if executed_trade_pnl is not None else [0.0] * len(dates)
+        self.overnight_pnl = overnight_pnl if overnight_pnl is not None else [0.0] * len(dates)
 
         # Initialize analysis objects
         self.metrics_calculator = PerformanceMetrics(risk_free_rate)
@@ -127,7 +141,7 @@ class BacktestResults:
             strategy_returns, benchmark_returns
         )
 
-    def generate_charts(self, output_dir: str):
+    def generate_charts(self, output_dir: str, close_prices: Optional[pd.DataFrame] = None):
         """
         Generate all charts.
 
@@ -135,10 +149,14 @@ class BacktestResults:
         -----------
         output_dir : str
             Directory to save charts
+        close_prices : pd.DataFrame, optional
+            Close prices for execution quality analysis (use case 3)
         """
         factor_pnl_df = None
         if self.attribution_tracker:
             factor_pnl_df = self.attribution_tracker.get_factor_pnl_series()
+
+        trades_df = self.get_trades_dataframe()
 
         self.visualizer.create_all_charts(
             self.dates,
@@ -149,7 +167,12 @@ class BacktestResults:
             self.transaction_costs,
             factor_pnl_df,
             output_dir,
-            factor_exposures=self.factor_exposures
+            factor_exposures=self.factor_exposures,
+            external_trade_pnl=self.external_trade_pnl,
+            executed_trade_pnl=self.executed_trade_pnl,
+            overnight_pnl=self.overnight_pnl,
+            trades_df=trades_df,
+            close_prices=close_prices
         )
 
     def generate_html_report(
@@ -288,6 +311,172 @@ class BacktestResults:
         if self.attribution_tracker:
             return self.attribution_tracker.get_factor_pnl_series()
         return None
+
+    def get_pnl_breakdown_dataframe(self) -> pd.DataFrame:
+        """
+        Get PnL breakdown as DataFrame.
+
+        Returns:
+        --------
+        pd.DataFrame
+            DataFrame with columns: date, external_pnl, executed_pnl, overnight_pnl, total_pnl
+        """
+        return pd.DataFrame({
+            'date': self.dates,
+            'external_pnl': self.external_trade_pnl,
+            'executed_pnl': self.executed_trade_pnl,
+            'overnight_pnl': self.overnight_pnl,
+            'total_pnl': self.daily_pnl
+        })
+
+    def get_external_trades_summary(self) -> pd.DataFrame:
+        """
+        Get summary statistics for external trades.
+
+        Returns:
+        --------
+        pd.DataFrame
+            Summary by ticker with columns: ticker, num_trades, total_qty,
+            avg_price, vwap, total_cost
+        """
+        trades_df = self.get_trades_dataframe()
+
+        if trades_df.empty or 'type' not in trades_df.columns:
+            return pd.DataFrame()
+
+        external_trades = trades_df[trades_df['type'] == 'external'].copy()
+
+        if external_trades.empty:
+            return pd.DataFrame()
+
+        # Calculate summary by ticker
+        summary = external_trades.groupby('ticker').agg({
+            'quantity': ['count', 'sum'],
+            'price': 'mean',
+            'cost': 'sum'
+        }).reset_index()
+
+        # Flatten column names
+        summary.columns = ['ticker', 'num_trades', 'total_qty', 'avg_price', 'total_cost']
+
+        # Calculate VWAP
+        vwap = external_trades.groupby('ticker').apply(
+            lambda x: (x['quantity'] * x['price']).sum() / x['quantity'].sum()
+        ).reset_index(name='vwap')
+
+        summary = summary.merge(vwap, on='ticker')
+
+        # Reorder columns
+        summary = summary[['ticker', 'num_trades', 'total_qty', 'vwap', 'avg_price', 'total_cost']]
+
+        return summary
+
+    def get_execution_quality_analysis(self, close_prices: pd.DataFrame) -> pd.DataFrame:
+        """
+        Analyze execution quality of external trades vs close prices.
+
+        Parameters:
+        -----------
+        close_prices : pd.DataFrame
+            DataFrame with dates as index and tickers as columns
+
+        Returns:
+        --------
+        pd.DataFrame
+            Analysis by ticker with columns: ticker, total_qty, vwap,
+            avg_close, slippage, slippage_pct, execution_pnl
+        """
+        trades_df = self.get_trades_dataframe()
+
+        if trades_df.empty or 'type' not in trades_df.columns:
+            return pd.DataFrame()
+
+        external_trades = trades_df[trades_df['type'] == 'external'].copy()
+
+        if external_trades.empty:
+            return pd.DataFrame()
+
+        results = []
+
+        for ticker in external_trades['ticker'].unique():
+            ticker_trades = external_trades[external_trades['ticker'] == ticker]
+
+            total_qty = ticker_trades['quantity'].sum()
+            vwap = (ticker_trades['quantity'] * ticker_trades['price']).sum() / total_qty
+
+            # Get weighted average close price for dates with trades
+            weighted_close = 0.0
+            for _, trade in ticker_trades.iterrows():
+                date = trade['date']
+                qty = trade['quantity']
+                if date in close_prices.index and ticker in close_prices.columns:
+                    close_px = close_prices.loc[date, ticker]
+                    weighted_close += abs(qty) * close_px
+
+            avg_close = weighted_close / abs(total_qty) if total_qty != 0 else 0.0
+
+            # Calculate slippage (positive = favorable execution)
+            # For buys: close - vwap (positive means bought below close)
+            # For sells: vwap - close (positive means sold above close)
+            if total_qty > 0:  # Net buyer
+                slippage = avg_close - vwap
+            else:  # Net seller
+                slippage = vwap - avg_close
+
+            slippage_pct = (slippage / avg_close * 100) if avg_close > 0 else 0.0
+
+            # Execution PnL from this ticker
+            ticker_pnl = ticker_trades.apply(
+                lambda row: row['quantity'] * (
+                    close_prices.loc[row['date'], ticker] - row['price']
+                ) if row['date'] in close_prices.index and ticker in close_prices.columns else 0.0,
+                axis=1
+            ).sum()
+
+            results.append({
+                'ticker': ticker,
+                'total_qty': total_qty,
+                'vwap': vwap,
+                'avg_close': avg_close,
+                'slippage': slippage,
+                'slippage_pct': slippage_pct,
+                'execution_pnl': ticker_pnl
+            })
+
+        return pd.DataFrame(results)
+
+    def get_external_trades_by_date(self) -> pd.DataFrame:
+        """
+        Get external trades grouped by date.
+
+        Returns:
+        --------
+        pd.DataFrame
+            Daily summary with columns: date, num_trades, num_tickers,
+            total_notional, total_cost
+        """
+        trades_df = self.get_trades_dataframe()
+
+        if trades_df.empty or 'type' not in trades_df.columns:
+            return pd.DataFrame()
+
+        external_trades = trades_df[trades_df['type'] == 'external'].copy()
+
+        if external_trades.empty:
+            return pd.DataFrame()
+
+        external_trades['notional'] = external_trades['quantity'] * external_trades['price']
+
+        daily_summary = external_trades.groupby('date').agg({
+            'quantity': 'count',  # num_trades
+            'ticker': 'nunique',  # num_tickers
+            'notional': lambda x: abs(x).sum(),  # total_notional
+            'cost': 'sum'  # total_cost
+        }).reset_index()
+
+        daily_summary.columns = ['date', 'num_trades', 'num_tickers', 'total_notional', 'total_cost']
+
+        return daily_summary
 
     def generate_full_report(
         self,

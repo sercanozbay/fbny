@@ -36,7 +36,8 @@ class BacktestResults:
         net_exposures: List[float],
         trades: List[Dict],
         attribution_tracker: Optional[AttributionTracker] = None,
-        risk_free_rate: float = 0.0
+        risk_free_rate: float = 0.0,
+        factor_exposures: Optional[List[Dict[str, float]]] = None
     ):
         """
         Initialize backtest results.
@@ -63,6 +64,8 @@ class BacktestResults:
             Attribution data
         risk_free_rate : float
             Risk-free rate for calculations
+        factor_exposures : List[Dict[str, float]], optional
+            Factor exposures over time
         """
         self.dates = dates
         self.portfolio_values = portfolio_values
@@ -73,6 +76,7 @@ class BacktestResults:
         self.net_exposures = net_exposures
         self.trades = trades
         self.attribution_tracker = attribution_tracker
+        self.factor_exposures = factor_exposures if factor_exposures is not None else []
 
         # Initialize analysis objects
         self.metrics_calculator = PerformanceMetrics(risk_free_rate)
@@ -144,7 +148,8 @@ class BacktestResults:
             self.net_exposures,
             self.transaction_costs,
             factor_pnl_df,
-            output_dir
+            output_dir,
+            factor_exposures=self.factor_exposures
         )
 
     def generate_html_report(

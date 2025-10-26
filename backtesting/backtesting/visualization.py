@@ -336,6 +336,154 @@ class BacktestVisualizer:
         else:
             plt.show()
 
+    def plot_factor_exposures_timeseries(
+        self,
+        dates: List[pd.Timestamp],
+        factor_exposures: List[Dict[str, float]],
+        save_path: Optional[str] = None
+    ):
+        """
+        Plot factor exposures over time.
+
+        Parameters:
+        -----------
+        dates : List[pd.Timestamp]
+            Dates
+        factor_exposures : List[Dict[str, float]]
+            Factor exposures per date (list of dicts with factor names as keys)
+        save_path : str, optional
+            Path to save figure
+        """
+        if not factor_exposures or not any(factor_exposures):
+            print("No factor exposure data available")
+            return
+
+        # Convert list of dicts to DataFrame
+        factor_exp_df = pd.DataFrame(factor_exposures, index=dates)
+
+        if factor_exp_df.empty or factor_exp_df.shape[1] == 0:
+            print("No factor exposure data available")
+            return
+
+        # Get factor names
+        factor_names = factor_exp_df.columns.tolist()
+        n_factors = len(factor_names)
+
+        if n_factors == 0:
+            return
+
+        # Create subplots - up to 6 factors per figure
+        n_cols = min(2, n_factors)
+        n_rows = min(3, int(np.ceil(n_factors / n_cols)))
+
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(self.figsize[0], n_rows*3), dpi=self.dpi)
+
+        if n_factors == 1:
+            axes = np.array([[axes]])
+        elif n_rows == 1:
+            axes = axes.reshape(1, -1)
+        elif n_cols == 1:
+            axes = axes.reshape(-1, 1)
+
+        # Plot each factor
+        for idx, factor in enumerate(factor_names[:n_rows*n_cols]):
+            row = idx // n_cols
+            col = idx % n_cols
+            ax = axes[row, col]
+
+            # Plot exposure line
+            factor_values = factor_exp_df[factor].values
+            ax.plot(dates, factor_values, linewidth=2, label=factor)
+            ax.axhline(y=0, color='black', linestyle='--', alpha=0.5, linewidth=1)
+
+            # Fill positive/negative areas
+            ax.fill_between(dates, 0, factor_values, where=(factor_values >= 0),
+                           alpha=0.3, color='green', label='Long')
+            ax.fill_between(dates, 0, factor_values, where=(factor_values < 0),
+                           alpha=0.3, color='red', label='Short')
+
+            ax.set_xlabel('Date')
+            ax.set_ylabel('Exposure')
+            ax.set_title(f'{factor} Exposure')
+            ax.grid(True, alpha=0.3)
+            ax.legend(loc='best', fontsize=8)
+
+        # Hide unused subplots
+        for idx in range(n_factors, n_rows * n_cols):
+            row = idx // n_cols
+            col = idx % n_cols
+            axes[row, col].axis('off')
+
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=self.dpi, bbox_inches='tight')
+            plt.close()
+        else:
+            plt.show()
+
+    def plot_factor_exposures_heatmap(
+        self,
+        dates: List[pd.Timestamp],
+        factor_exposures: List[Dict[str, float]],
+        save_path: Optional[str] = None
+    ):
+        """
+        Plot factor exposures as a heatmap.
+
+        Parameters:
+        -----------
+        dates : List[pd.Timestamp]
+            Dates
+        factor_exposures : List[Dict[str, float]]
+            Factor exposures per date
+        save_path : str, optional
+            Path to save figure
+        """
+        if not factor_exposures or not any(factor_exposures):
+            print("No factor exposure data available")
+            return
+
+        # Convert to DataFrame
+        factor_exp_df = pd.DataFrame(factor_exposures, index=dates)
+
+        if factor_exp_df.empty or factor_exp_df.shape[1] == 0:
+            print("No factor exposure data available")
+            return
+
+        fig, ax = plt.subplots(figsize=(self.figsize[0], max(4, len(factor_exp_df.columns)*0.5)), dpi=self.dpi)
+
+        # Create heatmap
+        im = ax.imshow(factor_exp_df.T.values, aspect='auto', cmap='RdYlGn',
+                       interpolation='nearest', vmin=-factor_exp_df.abs().max().max(),
+                       vmax=factor_exp_df.abs().max().max())
+
+        # Set ticks
+        ax.set_yticks(range(len(factor_exp_df.columns)))
+        ax.set_yticklabels(factor_exp_df.columns)
+
+        # Set x-axis with fewer labels for readability
+        n_ticks = min(10, len(dates))
+        tick_indices = np.linspace(0, len(dates)-1, n_ticks, dtype=int)
+        ax.set_xticks(tick_indices)
+        ax.set_xticklabels([dates[i].strftime('%Y-%m-%d') for i in tick_indices], rotation=45, ha='right')
+
+        ax.set_xlabel('Date')
+        ax.set_ylabel('Factor')
+        ax.set_title('Factor Exposures Heatmap')
+
+        # Add colorbar
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label('Exposure', rotation=270, labelpad=15)
+
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=self.dpi, bbox_inches='tight')
+            plt.close()
+        else:
+            plt.show()
+
     def create_all_charts(
         self,
         dates: List[pd.Timestamp],
@@ -345,7 +493,8 @@ class BacktestVisualizer:
         net_exposures: List[float],
         transaction_costs: List[float],
         factor_pnl_df: Optional[pd.DataFrame],
-        output_dir: str
+        output_dir: str,
+        factor_exposures: Optional[List[Dict[str, float]]] = None
     ):
         """
         Create all standard charts and save to directory.
@@ -368,6 +517,8 @@ class BacktestVisualizer:
             Factor PnL data
         output_dir : str
             Directory to save charts
+        factor_exposures : List[Dict[str, float]], optional
+            Factor exposures over time
         """
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
@@ -408,6 +559,17 @@ class BacktestVisualizer:
             self.plot_factor_attribution(
                 factor_pnl_df,
                 save_path=str(output_path / 'factor_attribution.png')
+            )
+
+        # Factor exposure charts
+        if factor_exposures is not None and any(factor_exposures):
+            self.plot_factor_exposures_timeseries(
+                dates, factor_exposures,
+                save_path=str(output_path / 'factor_exposures_timeseries.png')
+            )
+            self.plot_factor_exposures_heatmap(
+                dates, factor_exposures,
+                save_path=str(output_path / 'factor_exposures_heatmap.png')
             )
 
         print(f"Charts saved to {output_dir}")

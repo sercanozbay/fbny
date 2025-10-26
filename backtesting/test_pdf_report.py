@@ -49,11 +49,18 @@ betas = pd.DataFrame(
 n_factors = 3
 factor_names = [f'Factor_{i}' for i in range(n_factors)]
 
+# Create factor exposures with MultiIndex (date, ticker)
+# For simplicity, keep exposures constant over time
+factor_exp_data = []
+for date in dates:
+    for ticker in tickers:
+        factor_exp_data.append([date, ticker] + list(np.random.randn(n_factors) * 0.5))
+
 factor_exposures = pd.DataFrame(
-    np.random.randn(n_securities, n_factors) * 0.5,
-    index=tickers,
-    columns=factor_names
+    factor_exp_data,
+    columns=['date', 'ticker'] + factor_names
 )
+factor_exposures = factor_exposures.set_index(['date', 'ticker'])
 
 factor_returns = pd.DataFrame(
     np.random.randn(n_days, n_factors) * 0.01,

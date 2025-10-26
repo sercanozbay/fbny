@@ -505,7 +505,9 @@ class ReportGenerator:
                     ('return_distribution.png', 'Return Distribution'),
                     ('exposures.png', 'Portfolio Exposures'),
                     ('transaction_costs.png', 'Transaction Costs'),
-                    ('factor_attribution.png', 'Factor Attribution')
+                    ('factor_attribution.png', 'Factor Attribution'),
+                    ('factor_exposures_timeseries.png', 'Factor Exposures Over Time'),
+                    ('factor_exposures_heatmap.png', 'Factor Exposures Heatmap')
                 ]
 
                 for filename, title in chart_files:

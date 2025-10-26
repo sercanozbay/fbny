@@ -163,6 +163,7 @@ class BacktestState:
     # Exposure tracking
     gross_exposures: List[float] = field(default_factory=list)
     net_exposures: List[float] = field(default_factory=list)
+    factor_exposures: List[Dict[str, float]] = field(default_factory=list)  # Factor name -> exposure per date
 
     # Trade tracking
     trades: List[Dict] = field(default_factory=list)  # List of trade records

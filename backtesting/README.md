@@ -46,6 +46,7 @@ A comprehensive, production-ready backtesting framework for portfolio strategies
   - Excel reports with multiple sheets
   - CSV exports
   - Publication-quality charts
+  - Factor exposure visualization (time series and heatmaps)
 
 ### Performance Optimizations
 

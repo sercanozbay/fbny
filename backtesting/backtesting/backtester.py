@@ -207,6 +207,7 @@ class Backtester:
         self.state.transaction_costs.append(0.0)
         self.state.gross_exposures.append(portfolio.get_gross_exposure())
         self.state.net_exposures.append(portfolio.get_net_exposure())
+        self.state.factor_exposures.append({})  # Empty dict for initial state
 
     def _simulate_day(
         self,
@@ -275,7 +276,7 @@ class Backtester:
             date
         )
 
-        # Calculate attribution if factor data available
+        # Calculate attribution and factor exposures if factor data available
         if factor_loadings is not None and factor_returns:
             try:
                 factor_pnl, specific_pnl, _, _ = self.attributor.calculate_total_attribution(
@@ -289,9 +290,28 @@ class Backtester:
             except:
                 pass  # Skip attribution if error
 
+        # Calculate factor exposures for new portfolio
+        factor_exp_dict = {}
+        if factor_loadings is not None:
+            try:
+                factor_exp_array = self.risk_model.calculate_factor_exposures(
+                    new_portfolio.positions,
+                    prices,
+                    factor_loadings
+                )
+                # Convert to dict with factor names
+                factor_names = factor_loadings.columns.tolist()
+                factor_exp_dict = {
+                    factor_names[i]: float(factor_exp_array[i])
+                    for i in range(len(factor_names))
+                }
+            except:
+                pass  # Skip if error
+
         # Update state
         self.state.update(new_portfolio, total_cost)
         self.state.add_trades(trade_records)
+        self.state.factor_exposures.append(factor_exp_dict)
 
     def _process_use_case_1(
         self,
@@ -415,5 +435,6 @@ class Backtester:
             net_exposures=self.state.net_exposures,
             trades=self.state.trades,
             attribution_tracker=self.attribution_tracker,
-            risk_free_rate=self.config.risk_free_rate
+            risk_free_rate=self.config.risk_free_rate,
+            factor_exposures=self.state.factor_exposures
         )

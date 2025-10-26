@@ -17,10 +17,10 @@ This directory contains generated sample data for testing the backtester.
 
 ## Data Characteristics:
 
-- Number of securities: 100
-- Number of trading days: 252
+- Number of securities: 1500
+- Number of trading days: 1250
 - Number of factors: 5
-- Date range: 2023-01-02 to 2023-12-19
+- Date range: 2023-01-02 to 2027-10-15
 - Sectors: 10 sectors
 
 ## Note:

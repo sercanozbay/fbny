@@ -16,6 +16,15 @@ from .trade_generator import (
     TradeGeneratorConfig,
     generate_external_trades_from_signals
 )
+from .signal_generators import (
+    SignalGenerator,
+    TargetWeightSignalGenerator,
+    TargetPositionSignalGenerator,
+    AlphaSignalGenerator,
+    MomentumSignalGenerator,
+    ConditionalSignalGenerator,
+    create_simple_signal_generator
+)
 
 __all__ = [
     'Backtester',
@@ -27,5 +36,12 @@ __all__ = [
     'BacktestResults',
     'ExternalTradeGenerator',
     'TradeGeneratorConfig',
-    'generate_external_trades_from_signals'
+    'generate_external_trades_from_signals',
+    'SignalGenerator',
+    'TargetWeightSignalGenerator',
+    'TargetPositionSignalGenerator',
+    'AlphaSignalGenerator',
+    'MomentumSignalGenerator',
+    'ConditionalSignalGenerator',
+    'create_simple_signal_generator'
 ]

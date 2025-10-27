@@ -366,6 +366,367 @@ When `num_fills_per_ticker > 1`:
 - Simulates VWAP/TWAP algorithms
 - Better models realistic execution
 
+## Dynamic Trade Generation (Inside Simulation Loop)
+
+For more realistic strategies, you can generate trades **dynamically during backtesting** based on the current portfolio state. This allows your signals to react to portfolio performance, positions, and market conditions in real-time.
+
+### Method 1: Simple Callable Function
+
+Pass a function that generates trades based on current state:
+
+```python
+def generate_daily_trades(context):
+    """
+    Generate trades based on current portfolio state.
+
+    Parameters:
+    -----------
+    context : dict
+        Contains: date, portfolio, prices, adv, portfolio_value,
+                 dates, daily_returns, daily_pnl, etc.
+
+    Returns:
+    --------
+    Dict[str, List[Dict]]
+        External trades for this date
+    """
+    # Access current state
+    date = context['date']
+    current_positions = context['portfolio'].positions
+    prices = context['prices']
+    portfolio_value = context['portfolio_value']
+
+    # Your signal logic here
+    signals = {}
+
+    # Example: Simple momentum
+    if len(context['daily_returns']) >= 10:
+        recent_return = sum(context['daily_returns'][-10:])
+
+        if recent_return > 0.05:  # Portfolio up 5%
+            signals = {'AAPL': 0.30, 'MSFT': 0.20}  # Increase exposure
+        elif recent_return < -0.05:  # Portfolio down 5%
+            signals = {'AAPL': 0.10, 'MSFT': 0.10}  # Reduce exposure
+
+    if not signals:
+        return {}
+
+    # Convert signals to trades
+    from backtesting import generate_external_trades_from_signals
+
+    trades = generate_external_trades_from_signals(
+        signals=signals,
+        current_positions=current_positions,
+        close_prices=prices,
+        portfolio_value=portfolio_value,
+        signal_type='weights'
+    )
+
+    return trades
+
+# Use the function in backtest
+results = backtester.run(
+    start_date='2023-01-01',
+    end_date='2023-12-31',
+    use_case=3,
+    inputs={'external_trades': generate_daily_trades}  # Pass function, not dict!
+)
+```
+
+### Method 2: Signal Generator Classes
+
+Use pre-built signal generator classes for common patterns:
+
+#### Quick Start with create_simple_signal_generator
+
+```python
+from backtesting import create_simple_signal_generator
+
+def my_target_weights(context):
+    """Calculate target weights based on current state."""
+    # Your logic here
+    portfolio_return = sum(context['daily_returns'][-30:]) if len(context['daily_returns']) >= 30 else 0
+
+    if portfolio_return > 0.1:  # Strong performance
+        return {'AAPL': 0.4, 'MSFT': 0.3, 'GOOGL': 0.2}
+    else:
+        return {'AAPL': 0.2, 'MSFT': 0.2, 'GOOGL': 0.1}
+
+# Create generator
+signal_gen = create_simple_signal_generator(
+    signal_function=my_target_weights,
+    signal_type='weights'  # 'weights', 'positions', or 'scores'
+)
+
+# Use in backtest
+results = backtester.run(
+    use_case=3,
+    inputs={'external_trades': signal_gen}
+)
+
+# Access signal history
+history = signal_gen.get_history()
+print(history.head())
+```
+
+#### Target Weight Signal Generator
+
+Most common: generate target portfolio weights.
+
+```python
+from backtesting import TargetWeightSignalGenerator, TradeGeneratorConfig
+
+def calculate_target_weights(context):
+    """Your weight calculation logic."""
+    date = context['date']
+    portfolio_value = context['portfolio_value']
+    current_positions = context['portfolio'].positions
+
+    # Example: Rebalance based on portfolio drift
+    weights = {}
+    for ticker, shares in current_positions.items():
+        if ticker in context['prices']:
+            current_weight = (shares * context['prices'][ticker]) / portfolio_value
+
+            # If weight drifted too much, target original allocation
+            if abs(current_weight - 0.2) > 0.05:
+                weights[ticker] = 0.2
+
+    return weights
+
+# Configure trade generation
+trade_config = TradeGeneratorConfig(
+    price_impact_bps=5.0,
+    num_fills_per_ticker=3,
+    max_adv_participation=0.1
+)
+
+# Create signal generator
+signal_gen = TargetWeightSignalGenerator(
+    signal_function=calculate_target_weights,
+    trade_generator_config=trade_config
+)
+
+# Run backtest
+results = backtester.run(use_case=3, inputs={'external_trades': signal_gen})
+```
+
+#### Alpha Signal Generator
+
+Convert alpha scores to trades.
+
+```python
+from backtesting import AlphaSignalGenerator
+
+def calculate_alpha_scores(context):
+    """Calculate alpha/z-scores for each ticker."""
+    scores = {}
+
+    # Example: Mean reversion signals
+    prices = context['prices']
+
+    for ticker in ['AAPL', 'MSFT', 'GOOGL', 'TSLA']:
+        if ticker in prices:
+            # Simplified mean reversion
+            # In practice, you'd calculate proper z-scores
+            score = np.random.randn()  # Your alpha model here
+            scores[ticker] = score
+
+    return scores
+
+signal_gen = AlphaSignalGenerator(
+    signal_function=calculate_alpha_scores,
+    target_notional=1000000  # Allocate $1M based on scores
+)
+
+results = backtester.run(use_case=3, inputs={'external_trades': signal_gen})
+```
+
+#### Conditional Signal Generator
+
+Only trade when certain conditions are met.
+
+```python
+from backtesting import ConditionalSignalGenerator
+
+def should_trade(context):
+    """Decide if we should trade today."""
+    # Example: Only rebalance on month-end
+    date = context['date']
+    is_month_end = date.is_month_end
+
+    # Or: Only trade if portfolio has drifted
+    if context['portfolio_value'] > 0:
+        return True
+
+    return is_month_end
+
+def my_signals(context):
+    """Generate signals when condition is met."""
+    return {'AAPL': 0.3, 'MSFT': 0.2, 'GOOGL': 0.15}
+
+signal_gen = ConditionalSignalGenerator(
+    signal_function=my_signals,
+    condition_function=should_trade,
+    signal_type='weights'
+)
+
+results = backtester.run(use_case=3, inputs={'external_trades': signal_gen})
+```
+
+### Context Dictionary Reference
+
+The `context` dictionary passed to your signal functions contains:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `date` | pd.Timestamp | Current simulation date |
+| `portfolio` | Portfolio | Current portfolio state (positions, cash) |
+| `prices` | Dict[str, float] | Close prices for current date |
+| `adv` | Dict[str, float] | Average daily volume |
+| `betas` | Dict[str, float] | Market betas |
+| `sector_mapping` | Dict[str, str] | Ticker to sector mapping |
+| `factor_loadings` | pd.DataFrame | Factor exposures |
+| `factor_returns` | Dict[str, float] | Factor returns |
+| `portfolio_value` | float | Current portfolio value |
+| `dates` | List[pd.Timestamp] | Historical dates so far |
+| `daily_returns` | List[float] | Historical daily returns |
+| `daily_pnl` | List[float] | Historical daily PnL |
+
+### Complete Example: Dynamic Rebalancing Strategy
+
+```python
+from backtesting import (
+    Backtester, BacktestConfig, DataManager,
+    TargetWeightSignalGenerator, TradeGeneratorConfig
+)
+import numpy as np
+
+# Define strategy logic
+def dynamic_weights(context):
+    """
+    Calculate target weights based on portfolio performance and volatility.
+    """
+    # Don't trade first 30 days (need history)
+    if len(context['daily_returns']) < 30:
+        return {}
+
+    # Calculate recent metrics
+    recent_returns = context['daily_returns'][-30:]
+    recent_vol = np.std(recent_returns) * np.sqrt(252)  # Annualized
+    cumulative_return = np.prod([1 + r for r in recent_returns]) - 1
+
+    # Get current positions
+    current_positions = context['portfolio'].positions
+    portfolio_value = context['portfolio_value']
+
+    # Calculate current allocations
+    current_allocations = {}
+    for ticker, shares in current_positions.items():
+        if ticker in context['prices']:
+            value = shares * context['prices'][ticker]
+            current_allocations[ticker] = value / portfolio_value
+
+    # Adjust based on volatility
+    if recent_vol > 0.3:  # High vol - reduce exposure
+        target_leverage = 0.5
+    elif recent_vol < 0.15:  # Low vol - increase exposure
+        target_leverage = 1.2
+    else:
+        target_leverage = 1.0
+
+    # Adjust based on performance
+    if cumulative_return < -0.10:  # Down 10% - reduce risk
+        target_leverage *= 0.7
+    elif cumulative_return > 0.15:  # Up 15% - take profits
+        target_leverage *= 0.8
+
+    # Define base weights
+    base_weights = {
+        'AAPL': 0.25,
+        'MSFT': 0.25,
+        'GOOGL': 0.20,
+        'AMZN': 0.15,
+        'TSLA': 0.15
+    }
+
+    # Scale by target leverage
+    target_weights = {k: v * target_leverage for k, v in base_weights.items()}
+
+    # Only rebalance if drift is significant
+    needs_rebalance = False
+    for ticker, target_weight in target_weights.items():
+        current_weight = current_allocations.get(ticker, 0)
+        if abs(current_weight - target_weight) > 0.05:  # 5% drift
+            needs_rebalance = True
+            break
+
+    return target_weights if needs_rebalance else {}
+
+# Setup
+data_manager = DataManager('data')
+config = BacktestConfig(
+    initial_cash=1000000,
+    transaction_cost_bps=10,
+    max_portfolio_variance=0.015
+)
+backtester = Backtester(data_manager, config)
+
+# Create signal generator
+trade_config = TradeGeneratorConfig(
+    price_impact_bps=5.0,
+    num_fills_per_ticker=3,
+    max_adv_participation=0.10
+)
+
+signal_gen = TargetWeightSignalGenerator(
+    signal_function=dynamic_weights,
+    trade_generator_config=trade_config
+)
+
+# Run backtest
+results = backtester.run(
+    start_date='2023-01-01',
+    end_date='2023-12-31',
+    use_case=3,
+    inputs={'external_trades': signal_gen}
+)
+
+# Analyze
+metrics = results.calculate_metrics()
+print(f"Total Return: {metrics['total_return']:.2%}")
+print(f"Sharpe Ratio: {metrics['sharpe_ratio']:.2f}")
+print(f"Max Drawdown: {metrics['max_drawdown']:.2%}")
+
+# View signal history
+signal_history = signal_gen.get_history()
+print(f"\nGenerated {len(signal_history)} signals")
+print(signal_history.head())
+
+# Detailed analysis
+pnl_breakdown = results.get_pnl_breakdown_dataframe()
+print("\nPnL Breakdown:")
+print(pnl_breakdown.tail())
+```
+
+### Advantages of Dynamic Generation
+
+1. **State-Aware**: React to portfolio performance, positions, volatility
+2. **Realistic**: Mimics how traders actually make decisions
+3. **Memory Efficient**: Don't need to pre-generate all trades
+4. **Flexible**: Easy to implement complex strategies (mean reversion, momentum, risk parity)
+5. **Interactive**: Can use current portfolio metrics to adjust strategy
+6. **Conditional**: Only trade when conditions are met (month-end, significant drift)
+
+### Tips
+
+- **Start simple**: Use `create_simple_signal_generator()` for quick prototyping
+- **Use history**: Access `context['daily_returns']`, `context['daily_pnl']` for lookback
+- **Check positions**: Use `context['portfolio'].positions` to avoid overtrading
+- **Handle edge cases**: Return `{}` when you don't want to trade
+- **Test conditions**: Use `ConditionalSignalGenerator` for rule-based trading
+- **Track signals**: Use `signal_gen.get_history()` to analyze your signals
+
 ## Complete Example
 
 ```python
@@ -999,7 +1360,54 @@ Automatically generated charts:
 
 ### Trade Generation
 
-The framework can automatically generate external trades from signals:
+The framework supports **two modes** of trade generation:
+
+#### Mode 1: Static (Pre-Generated)
+Generate all trades upfront before backtest:
+```python
+trades = generate_external_trades_from_signals(
+    signals={'AAPL': 0.3, 'MSFT': 0.2},
+    current_positions={'AAPL': 100},
+    close_prices=prices,
+    portfolio_value=100000,
+    signal_type='weights'
+)
+results = backtester.run(use_case=3, inputs={'external_trades': trades})
+```
+
+#### Mode 2: Dynamic (Inside Simulation Loop)
+Generate trades based on current portfolio state during backtest:
+```python
+def generate_trades(context):
+    # Access current state
+    portfolio_value = context['portfolio_value']
+    current_positions = context['portfolio'].positions
+
+    # Your strategy logic here
+    if sum(context['daily_returns'][-10:]) > 0.05:
+        signals = {'AAPL': 0.3, 'MSFT': 0.2}
+    else:
+        signals = {'AAPL': 0.1, 'MSFT': 0.1}
+
+    return generate_external_trades_from_signals(
+        signals, current_positions, context['prices'],
+        portfolio_value, signal_type='weights'
+    )
+
+# Pass function directly
+results = backtester.run(use_case=3, inputs={'external_trades': generate_trades})
+```
+
+Or use signal generator classes:
+```python
+from backtesting import create_simple_signal_generator
+
+signal_gen = create_simple_signal_generator(
+    signal_function=lambda ctx: {'AAPL': 0.3, 'MSFT': 0.2},
+    signal_type='weights'
+)
+results = backtester.run(use_case=3, inputs={'external_trades': signal_gen})
+```
 
 **Four signal types supported:**
 - `'weights'` - Target portfolio weights (most common)
@@ -1007,24 +1415,11 @@ The framework can automatically generate external trades from signals:
 - `'deltas'` - Direct trade quantities
 - `'scores'` - Alpha signals converted to trades
 
-**Quick example:**
-```python
-from backtesting import generate_external_trades_from_signals
-
-trades = generate_external_trades_from_signals(
-    signals={'AAPL': 0.3, 'MSFT': 0.2},  # 30% AAPL, 20% MSFT
-    current_positions={'AAPL': 100},
-    close_prices=prices,
-    portfolio_value=100000,
-    signal_type='weights'
-)
-```
-
-**Features:**
-- Accounts for current positions automatically
-- Applies ADV constraints
-- Simulates realistic execution (slippage, multiple fills)
-- Multi-day trade generation from time series
+**Dynamic generation advantages:**
+- React to portfolio performance and positions
+- Implement conditional trading logic
+- Access full backtest history
+- More realistic strategy modeling
 
 ### Key Features
 

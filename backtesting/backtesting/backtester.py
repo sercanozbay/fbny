@@ -478,12 +478,40 @@ class Backtester:
 
         This method handles external trades with their own execution prices
         and separates PnL into external, executed, and overnight components.
+
+        External trades can be provided as:
+        1. Dict[date, trades] - pre-generated trades
+        2. Callable - function to generate trades dynamically based on state
         """
         external_trades_by_date = inputs.get('external_trades', {})
         external_exec_prices_by_date = inputs.get('external_exec_prices', {})
 
-        # Get external trades and their execution prices
-        external_trades = external_trades_by_date.get(date, {})
+        # Check if external_trades is a callable (signal generator)
+        if callable(external_trades_by_date):
+            # Create context for the callable
+            context = {
+                'date': date,
+                'portfolio': self.state.portfolio,
+                'prices': prices,
+                'adv': adv,
+                'betas': betas,
+                'sector_mapping': sector_mapping,
+                'factor_loadings': factor_loadings,
+                'factor_returns': factor_returns,
+                'portfolio_value': self.state.portfolio_values[-1] if self.state.portfolio_values else self.config.initial_cash,
+                'dates': self.state.dates,
+                'daily_returns': self.state.daily_returns,
+                'daily_pnl': self.state.daily_pnl
+            }
+
+            # Call the function to generate trades for this date
+            external_trades = external_trades_by_date(context)
+            if external_trades is None:
+                external_trades = {}
+        else:
+            # Get external trades from pre-generated dict
+            external_trades = external_trades_by_date.get(date, {})
+
         external_exec_prices = external_exec_prices_by_date.get(date, None)
 
         # Apply external trades to get intermediate positions

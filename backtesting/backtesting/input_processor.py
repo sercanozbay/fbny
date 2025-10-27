@@ -9,7 +9,7 @@ This module handles processing of inputs for the three main use cases:
 
 import numpy as np
 import pandas as pd
-from typing import Dict, Optional, Tuple, Literal
+from typing import Dict, Optional, Tuple, Literal, List
 
 from .utils import weights_to_shares, notional_to_shares
 

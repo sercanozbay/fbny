@@ -667,10 +667,10 @@ def dynamic_weights(context):
 data_manager = DataManager('data')
 config = BacktestConfig(
     initial_cash=1000000,
-    transaction_cost_bps=10,
+    tc_fixed=0.001,  # 10 bps fixed transaction cost (0.001 = 10 bps)
     max_portfolio_variance=0.015
 )
-backtester = Backtester(data_manager, config)
+backtester = Backtester(config, data_manager)  # config first, then data_manager
 
 # Create signal generator
 trade_config = TradeGeneratorConfig(

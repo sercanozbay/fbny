@@ -40,7 +40,9 @@ class BacktestResults:
         factor_exposures: Optional[List[Dict[str, float]]] = None,
         external_trade_pnl: Optional[List[float]] = None,
         executed_trade_pnl: Optional[List[float]] = None,
-        overnight_pnl: Optional[List[float]] = None
+        overnight_pnl: Optional[List[float]] = None,
+        external_trades_by_tag: Optional[List[Dict[str, List[Dict]]]] = None,
+        external_pnl_by_tag: Optional[Dict[str, List[float]]] = None
     ):
         """
         Initialize backtest results.
@@ -75,6 +77,10 @@ class BacktestResults:
             PnL from executed/optimized trades
         overnight_pnl : List[float], optional
             PnL from overnight price changes
+        external_trades_by_tag : List[Dict[str, List[Dict]]], optional
+            External trades grouped by tag for each date
+        external_pnl_by_tag : Dict[str, List[float]], optional
+            Daily PnL by tag/counterparty
         """
         self.dates = dates
         self.portfolio_values = portfolio_values
@@ -91,6 +97,10 @@ class BacktestResults:
         self.external_trade_pnl = external_trade_pnl if external_trade_pnl is not None else [0.0] * len(dates)
         self.executed_trade_pnl = executed_trade_pnl if executed_trade_pnl is not None else [0.0] * len(dates)
         self.overnight_pnl = overnight_pnl if overnight_pnl is not None else [0.0] * len(dates)
+
+        # Tag-based attribution
+        self.external_trades_by_tag = external_trades_by_tag if external_trades_by_tag is not None else []
+        self.external_pnl_by_tag = external_pnl_by_tag if external_pnl_by_tag is not None else {}
 
         # Initialize analysis objects
         self.metrics_calculator = PerformanceMetrics(risk_free_rate)
@@ -477,6 +487,156 @@ class BacktestResults:
         daily_summary.columns = ['date', 'num_trades', 'num_tickers', 'total_notional', 'total_cost']
 
         return daily_summary
+
+    def get_pnl_by_tag(self, tag: Optional[str] = None) -> pd.DataFrame:
+        """
+        Get PnL attribution by tag/counterparty.
+
+        Parameters:
+        -----------
+        tag : str, optional
+            Specific tag to retrieve. If None, returns all tags.
+
+        Returns:
+        --------
+        pd.DataFrame
+            Daily PnL by tag with columns: date, tag, pnl
+
+        Example:
+        --------
+        >>> # Get PnL for specific counterparty
+        >>> counterparty_pnl = results.get_pnl_by_tag('Goldman Sachs')
+        >>>
+        >>> # Get PnL for all counterparties
+        >>> all_pnl = results.get_pnl_by_tag()
+        """
+        if not self.external_pnl_by_tag:
+            return pd.DataFrame(columns=['date', 'tag', 'pnl'])
+
+        records = []
+
+        if tag is not None:
+            # Get specific tag
+            if tag in self.external_pnl_by_tag:
+                pnl_series = self.external_pnl_by_tag[tag]
+                for i, pnl in enumerate(pnl_series):
+                    if i < len(self.dates):
+                        records.append({
+                            'date': self.dates[i],
+                            'tag': tag,
+                            'pnl': pnl
+                        })
+        else:
+            # Get all tags
+            for tag_name, pnl_series in self.external_pnl_by_tag.items():
+                for i, pnl in enumerate(pnl_series):
+                    if i < len(self.dates):
+                        records.append({
+                            'date': self.dates[i],
+                            'tag': tag_name,
+                            'pnl': pnl
+                        })
+
+        return pd.DataFrame(records)
+
+    def get_pnl_summary_by_tag(self) -> pd.DataFrame:
+        """
+        Get summary statistics of PnL by tag/counterparty.
+
+        Returns:
+        --------
+        pd.DataFrame
+            Summary with columns: tag, total_pnl, mean_pnl, std_pnl, sharpe,
+            num_days, win_rate
+
+        Example:
+        --------
+        >>> summary = results.get_pnl_summary_by_tag()
+        >>> print(summary)
+                      tag  total_pnl  mean_pnl  std_pnl  sharpe  num_days  win_rate
+        0  Goldman Sachs    125000.0   5000.0   8000.0    0.62        25      0.60
+        1    Morgan Stanley  98000.0   4900.0   7200.0    0.68        20      0.65
+        """
+        if not self.external_pnl_by_tag:
+            return pd.DataFrame(columns=[
+                'tag', 'total_pnl', 'mean_pnl', 'std_pnl',
+                'sharpe', 'num_days', 'win_rate'
+            ])
+
+        summaries = []
+
+        for tag, pnl_series in self.external_pnl_by_tag.items():
+            pnl_array = np.array(pnl_series)
+
+            # Filter out zero days
+            non_zero_pnl = pnl_array[pnl_array != 0]
+
+            if len(non_zero_pnl) == 0:
+                continue
+
+            total_pnl = np.sum(pnl_array)
+            mean_pnl = np.mean(non_zero_pnl)
+            std_pnl = np.std(non_zero_pnl)
+            sharpe = (mean_pnl / std_pnl * np.sqrt(252)) if std_pnl > 0 else 0.0
+            num_days = len(non_zero_pnl)
+            win_rate = np.sum(non_zero_pnl > 0) / len(non_zero_pnl) if len(non_zero_pnl) > 0 else 0.0
+
+            summaries.append({
+                'tag': tag,
+                'total_pnl': total_pnl,
+                'mean_pnl': mean_pnl,
+                'std_pnl': std_pnl,
+                'sharpe': sharpe,
+                'num_days': num_days,
+                'win_rate': win_rate
+            })
+
+        df = pd.DataFrame(summaries)
+
+        # Sort by total PnL descending
+        if not df.empty:
+            df = df.sort_values('total_pnl', ascending=False).reset_index(drop=True)
+
+        return df
+
+    def get_trades_by_tag(self, tag: Optional[str] = None) -> pd.DataFrame:
+        """
+        Get external trades filtered by tag.
+
+        Parameters:
+        -----------
+        tag : str, optional
+            Specific tag to retrieve. If None, returns all external trades with tags.
+
+        Returns:
+        --------
+        pd.DataFrame
+            Trades with tag information
+
+        Example:
+        --------
+        >>> gs_trades = results.get_trades_by_tag('Goldman Sachs')
+        """
+        trades_df = self.get_trades_dataframe()
+
+        if trades_df.empty:
+            return pd.DataFrame()
+
+        # Filter to external trades only
+        if 'type' in trades_df.columns:
+            external_trades = trades_df[trades_df['type'] == 'external'].copy()
+        else:
+            external_trades = trades_df.copy()
+
+        if external_trades.empty:
+            return pd.DataFrame()
+
+        # Filter by tag if specified
+        if tag is not None:
+            if 'tag' in external_trades.columns:
+                external_trades = external_trades[external_trades['tag'] == tag]
+
+        return external_trades
 
     def generate_full_report(
         self,

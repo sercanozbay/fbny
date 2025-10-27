@@ -173,6 +173,10 @@ class BacktestState:
     # Trade tracking
     trades: List[Dict] = field(default_factory=list)  # List of trade records
 
+    # External trade tag tracking (for counterparty/group attribution)
+    external_trades_by_tag: List[Dict[str, List[Dict]]] = field(default_factory=list)  # Date -> {tag -> [trades]}
+    external_pnl_by_tag: Dict[str, List[float]] = field(default_factory=dict)  # tag -> [daily PnLs]
+
     def update(
         self,
         new_portfolio: Portfolio,
@@ -227,3 +231,39 @@ class BacktestState:
     def add_trades(self, trade_records: List[Dict]):
         """Add trade records to history."""
         self.trades.extend(trade_records)
+
+    def add_external_trades_with_tags(self, date: np.datetime64, trade_records: List[Dict]):
+        """
+        Record external trades grouped by tag for attribution.
+
+        Parameters:
+        -----------
+        date : np.datetime64
+            Trade date
+        trade_records : List[Dict]
+            List of trade records with 'ticker', 'qty', 'price', and optional 'tag'
+        """
+        # Group trades by tag
+        trades_by_tag = {}
+        for trade in trade_records:
+            tag = trade.get('tag', 'untagged')
+            if tag not in trades_by_tag:
+                trades_by_tag[tag] = []
+            trades_by_tag[tag].append(trade)
+
+        self.external_trades_by_tag.append(trades_by_tag)
+
+    def record_external_pnl_by_tag(self, tag: str, pnl: float):
+        """
+        Record PnL for a specific tag/counterparty.
+
+        Parameters:
+        -----------
+        tag : str
+            Tag identifier (e.g., counterparty name)
+        pnl : float
+            PnL amount for this tag on this day
+        """
+        if tag not in self.external_pnl_by_tag:
+            self.external_pnl_by_tag[tag] = []
+        self.external_pnl_by_tag[tag].append(pnl)

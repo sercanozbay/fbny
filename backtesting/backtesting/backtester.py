@@ -516,11 +516,14 @@ class Backtester:
 
         # Apply external trades to get intermediate positions
         if external_trades:
-            positions_after_external = self.external_processor.apply_external_trades(
+            positions_after_external, external_trade_records = self.external_processor.apply_external_trades(
                 self.state.portfolio.positions, external_trades
             )
+            # Record external trades with tags for attribution
+            self.state.add_external_trades_with_tags(date, external_trade_records)
         else:
             positions_after_external = self.state.portfolio.positions.copy()
+            external_trade_records = []
 
         # Check if optimization is needed
         needs_optimization = (
@@ -633,6 +636,18 @@ class Backtester:
         self.state.add_trades(trade_records)
         self.state.factor_exposures.append(factor_exp_dict)
 
+        # Aggregate PnL by tag for external trades
+        pnl_by_tag = {}
+        for trade_record in trade_records:
+            if trade_record.get('type') == 'external':
+                tag = trade_record.get('tag', 'untagged')
+                trade_pnl = trade_record.get('pnl', 0.0)
+                pnl_by_tag[tag] = pnl_by_tag.get(tag, 0.0) + trade_pnl
+
+        # Record PnL for each tag
+        for tag, pnl in pnl_by_tag.items():
+            self.state.record_external_pnl_by_tag(tag, pnl)
+
         # Update previous prices for next day
         self.prev_prices = prices
 
@@ -652,5 +667,7 @@ class Backtester:
             factor_exposures=self.state.factor_exposures,
             external_trade_pnl=self.state.external_trade_pnl,
             executed_trade_pnl=self.state.executed_trade_pnl,
-            overnight_pnl=self.state.overnight_pnl
+            overnight_pnl=self.state.overnight_pnl,
+            external_trades_by_tag=self.state.external_trades_by_tag,
+            external_pnl_by_tag=self.state.external_pnl_by_tag
         )

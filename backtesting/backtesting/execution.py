@@ -208,6 +208,7 @@ class TradeExecutor:
             for trade in trade_list:
                 qty = trade.get('qty', 0)
                 exec_price = trade.get('price', close_price)
+                tag = trade.get('tag', None)  # Extract tag for attribution
 
                 if qty == 0:
                     continue
@@ -227,16 +228,19 @@ class TradeExecutor:
 
                 # PnL from external trade (difference between exec and close)
                 # Positive = bought below close or sold above close (good execution)
-                external_pnl += qty * (close_price - exec_price)
+                trade_pnl = qty * (close_price - exec_price)
+                external_pnl += trade_pnl
 
-                # Record trade
+                # Record trade with tag
                 trade_records.append({
                     'date': date,
                     'ticker': ticker,
                     'quantity': qty,
                     'price': exec_price,
                     'cost': cost,
-                    'type': 'external'
+                    'type': 'external',
+                    'tag': tag,
+                    'pnl': trade_pnl  # Store individual trade PnL for tag attribution
                 })
 
         # Execute internal trades

@@ -319,7 +319,7 @@ class ExternalTradesProcessor:
         self,
         current_positions: Dict[str, float],
         external_trades: Dict[str, List[Dict]]
-    ) -> Dict[str, float]:
+    ) -> tuple[Dict[str, float], List[Dict]]:
         """
         Apply external trades to current positions.
 
@@ -329,14 +329,16 @@ class ExternalTradesProcessor:
             Current holdings
         external_trades : Dict[str, List[Dict]]
             External trades to apply
-            Format: {ticker: [{'qty': shares, 'price': price}, ...], ...}
+            Format: {ticker: [{'qty': shares, 'price': price, 'tag': 'optional_tag'}, ...], ...}
 
         Returns:
         --------
-        Dict[str, float]
-            New positions after external trades
+        tuple[Dict[str, float], List[Dict]]
+            - New positions after external trades
+            - List of trade records with tags extracted
         """
         new_positions = current_positions.copy()
+        trade_records = []
 
         for ticker, trade_list in external_trades.items():
             if not isinstance(trade_list, list):
@@ -345,9 +347,22 @@ class ExternalTradesProcessor:
                     f"Got {type(trade_list)} for {ticker}"
                 )
 
-            # Sum up all trades for this ticker
-            total_qty = sum(trade.get('qty', 0) for trade in trade_list)
-            new_positions[ticker] = new_positions.get(ticker, 0.0) + total_qty
+            # Sum up all trades for this ticker and extract tags
+            for trade in trade_list:
+                qty = trade.get('qty', 0)
+                price = trade.get('price', 0)
+                tag = trade.get('tag', None)  # Optional tag for grouping
+
+                # Record trade with tag
+                trade_records.append({
+                    'ticker': ticker,
+                    'qty': qty,
+                    'price': price,
+                    'tag': tag
+                })
+
+                # Update position
+                new_positions[ticker] = new_positions.get(ticker, 0.0) + qty
 
         # Remove zero positions
         new_positions = {
@@ -356,4 +371,4 @@ class ExternalTradesProcessor:
             if abs(qty) > 1e-6
         }
 
-        return new_positions
+        return new_positions, trade_records

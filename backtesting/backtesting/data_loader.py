@@ -45,6 +45,7 @@ class DataManager:
         self._factor_covariance: Optional[pd.DataFrame] = None
         self._specific_variance: Optional[pd.DataFrame] = None
         self._sector_mapping: Optional[pd.DataFrame] = None
+        self._external_trades: Optional[pd.DataFrame] = None
 
         self._date_range: Optional[Tuple[pd.Timestamp, pd.Timestamp]] = None
         self._tickers: Optional[List[str]] = None
@@ -218,6 +219,121 @@ class DataManager:
                   f"{self._sector_mapping['sector'].nunique()} sectors")
 
         return self._sector_mapping
+
+    def load_external_trades(self, filename: str = 'external_trades.csv') -> pd.DataFrame:
+        """
+        Load external trades from CSV with optional tag support.
+
+        Expected format: CSV with columns:
+        - date: Trade date (will be parsed as datetime)
+        - ticker: Security ticker
+        - qty: Trade quantity (positive for buy, negative for sell)
+        - price: Execution price
+        - tag: (Optional) Tag for attribution (e.g., counterparty name)
+
+        Returns:
+        --------
+        pd.DataFrame
+            DataFrame with external trades
+
+        Example CSV:
+        ------------
+        date,ticker,qty,price,tag
+        2023-01-02,STOCK0000,1000,150.25,Goldman Sachs
+        2023-01-02,STOCK0001,-500,200.50,Morgan Stanley
+        2023-01-03,STOCK0000,500,151.00,JPMorgan
+        """
+        if self._external_trades is None:
+            filepath = self.data_dir / filename
+            if not filepath.exists():
+                warnings.warn(f"External trades file not found: {filepath}")
+                return pd.DataFrame()
+
+            self._external_trades = pd.read_csv(
+                filepath,
+                parse_dates=['date']
+            )
+            self._external_trades['date'] = pd.to_datetime(self._external_trades['date'])
+
+            # Validate required columns
+            required_cols = ['date', 'ticker', 'qty', 'price']
+            missing_cols = [col for col in required_cols if col not in self._external_trades.columns]
+            if missing_cols:
+                raise ValueError(
+                    f"External trades CSV missing required columns: {missing_cols}. "
+                    f"Required: {required_cols}. Optional: ['tag']"
+                )
+
+            # Add tag column if not present (for backward compatibility)
+            if 'tag' not in self._external_trades.columns:
+                self._external_trades['tag'] = None
+
+            # Convert types
+            self._external_trades['qty'] = self._external_trades['qty'].astype(float)
+            self._external_trades['price'] = self._external_trades['price'].astype(self.dtype)
+
+            print(f"Loaded external trades: {len(self._external_trades)} trades, "
+                  f"{self._external_trades['date'].nunique()} dates, "
+                  f"{self._external_trades['ticker'].nunique()} tickers")
+
+            # Show tag summary if tags are present
+            if self._external_trades['tag'].notna().any():
+                n_tags = self._external_trades['tag'].nunique()
+                print(f"  Tags found: {n_tags} unique tags")
+
+        return self._external_trades
+
+    def get_external_trades_by_date(self) -> Dict[pd.Timestamp, Dict[str, List[Dict]]]:
+        """
+        Convert external trades DataFrame to the format expected by Use Case 3.
+
+        Returns:
+        --------
+        Dict[pd.Timestamp, Dict[str, List[Dict]]]
+            Nested dict: {date: {ticker: [{'qty': X, 'price': Y, 'tag': Z}, ...]}}
+
+        Example:
+        --------
+        >>> data_manager = DataManager('../data')
+        >>> trades_by_date = data_manager.get_external_trades_by_date()
+        >>> print(trades_by_date[pd.Timestamp('2023-01-02')])
+        {
+            'STOCK0000': [{'qty': 1000.0, 'price': 150.25, 'tag': 'Goldman Sachs'}],
+            'STOCK0001': [{'qty': -500.0, 'price': 200.50, 'tag': 'Morgan Stanley'}]
+        }
+        """
+        trades_df = self.load_external_trades()
+
+        if trades_df.empty:
+            return {}
+
+        trades_by_date = {}
+
+        for date in trades_df['date'].unique():
+            date_trades = trades_df[trades_df['date'] == date]
+
+            ticker_trades = {}
+            for ticker in date_trades['ticker'].unique():
+                ticker_rows = date_trades[date_trades['ticker'] == ticker]
+
+                # Group into list of trade dicts
+                trade_list = []
+                for _, row in ticker_rows.iterrows():
+                    trade_dict = {
+                        'qty': float(row['qty']),
+                        'price': float(row['price'])
+                    }
+                    # Add tag if present
+                    if pd.notna(row['tag']):
+                        trade_dict['tag'] = str(row['tag'])
+
+                    trade_list.append(trade_dict)
+
+                ticker_trades[ticker] = trade_list
+
+            trades_by_date[pd.Timestamp(date)] = ticker_trades
+
+        return trades_by_date
 
     def get_date_range(self) -> Tuple[pd.Timestamp, pd.Timestamp]:
         """Get the available date range from price data."""

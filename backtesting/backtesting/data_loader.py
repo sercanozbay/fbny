@@ -11,6 +11,11 @@ from pathlib import Path
 from typing import Dict, Optional, List, Tuple
 import warnings
 
+from .na_handling import (
+    NAHandlingConfig, NAHandler, FillMethod,
+    ensure_positive_definite, apply_shrinkage
+)
+
 
 class DataManager:
     """
@@ -20,7 +25,13 @@ class DataManager:
     efficient slicing by date.
     """
 
-    def __init__(self, data_dir: str, use_float32: bool = True):
+    def __init__(
+        self,
+        data_dir: str,
+        use_float32: bool = True,
+        na_config: Optional[NAHandlingConfig] = None,
+        enable_na_handling: bool = True
+    ):
         """
         Initialize data manager.
 
@@ -30,10 +41,19 @@ class DataManager:
             Directory containing CSV data files
         use_float32 : bool
             Use float32 instead of float64 for memory efficiency
+        na_config : NAHandlingConfig, optional
+            Configuration for NA handling. If None, uses defaults.
+        enable_na_handling : bool
+            Enable automatic NA handling on load
         """
         self.data_dir = Path(data_dir)
         self.use_float32 = use_float32
         self.dtype = np.float32 if use_float32 else np.float64
+
+        # NA handling configuration
+        self.enable_na_handling = enable_na_handling
+        self.na_config = na_config if na_config is not None else NAHandlingConfig()
+        self.na_handler = NAHandler(self.na_config)
 
         # Cached data
         self._prices: Optional[pd.DataFrame] = None
@@ -52,7 +72,7 @@ class DataManager:
 
     def load_prices(self, filename: str = 'prices.csv') -> pd.DataFrame:
         """
-        Load price data.
+        Load price data with automatic NA handling.
 
         Expected format: CSV with 'date' index and ticker columns.
 
@@ -70,6 +90,26 @@ class DataManager:
             ).astype(self.dtype)
             self._prices.index = pd.to_datetime(self._prices.index)
             print(f"Loaded prices: {self._prices.shape[0]} dates, {self._prices.shape[1]} securities")
+
+            # Apply NA handling
+            if self.enable_na_handling:
+                self._prices = self.na_handler.handle_timeseries_data(
+                    df=self._prices,
+                    data_type="Prices",
+                    method=self.na_config.prices_method,
+                    max_gap=self.na_config.prices_max_gap,
+                    drop_threshold=self.na_config.prices_drop_threshold,
+                    min_value=0.0  # Prices must be positive
+                )
+
+                # Check if too many NAs remain
+                na_pct = self._prices.isna().sum().sum() / (self._prices.shape[0] * self._prices.shape[1])
+                if na_pct > self.na_config.prices_fail_threshold:
+                    raise ValueError(
+                        f"Prices contain {na_pct:.2%} missing values after NA handling "
+                        f"(threshold: {self.na_config.prices_fail_threshold:.2%}). "
+                        f"Please check data quality or adjust NA handling configuration."
+                    )
 
         return self._prices
 
@@ -96,7 +136,7 @@ class DataManager:
 
     def load_adv(self, filename: str = 'adv.csv') -> pd.DataFrame:
         """
-        Load average daily volume data.
+        Load average daily volume data with automatic NA handling.
 
         Expected format: CSV with 'date' index and ticker columns.
         """
@@ -110,11 +150,23 @@ class DataManager:
             self._adv.index = pd.to_datetime(self._adv.index)
             print(f"Loaded ADV: {self._adv.shape[0]} dates, {self._adv.shape[1]} securities")
 
+            # Apply NA handling
+            if self.enable_na_handling:
+                self._adv = self.na_handler.handle_timeseries_data(
+                    df=self._adv,
+                    data_type="ADV",
+                    method=self.na_config.adv_method,
+                    max_gap=self.na_config.adv_max_gap,
+                    default_value=self.na_config.adv_default_value,
+                    drop_threshold=self.na_config.adv_drop_threshold,
+                    min_value=self.na_config.adv_default_value  # ADV must be positive
+                )
+
         return self._adv
 
     def load_betas(self, filename: str = 'betas.csv') -> pd.DataFrame:
         """
-        Load beta data per security per date.
+        Load beta data per security per date with automatic NA handling.
 
         Expected format: CSV with 'date' index and ticker columns.
         """
@@ -128,11 +180,24 @@ class DataManager:
             self._betas.index = pd.to_datetime(self._betas.index)
             print(f"Loaded betas: {self._betas.shape[0]} dates, {self._betas.shape[1]} securities")
 
+            # Apply NA handling
+            if self.enable_na_handling:
+                self._betas = self.na_handler.handle_timeseries_data(
+                    df=self._betas,
+                    data_type="Betas",
+                    method=self.na_config.beta_method,
+                    max_gap=self.na_config.beta_max_gap,
+                    default_value=self.na_config.beta_default_value,
+                    drop_threshold=self.na_config.beta_drop_threshold,
+                    min_value=self.na_config.beta_min_value,
+                    max_value=self.na_config.beta_max_value
+                )
+
         return self._betas
 
     def load_factor_exposures(self, filename: str = 'factor_exposures.csv') -> pd.DataFrame:
         """
-        Load factor exposures.
+        Load factor exposures with automatic NA handling.
 
         Expected format: CSV with MultiIndex (date, ticker) and factor columns.
         """
@@ -151,11 +216,22 @@ class DataManager:
                   f"{len(self._factor_exposures.index.unique(level=1))} securities, "
                   f"{self._factor_exposures.shape[1]} factors")
 
+            # Apply NA handling
+            if self.enable_na_handling:
+                self._factor_exposures = self.na_handler.handle_multiindex_data(
+                    df=self._factor_exposures,
+                    data_type="Factor Exposures",
+                    method=self.na_config.factor_exposures_method,
+                    max_gap=self.na_config.factor_exposures_max_gap,
+                    use_cross_sectional=self.na_config.factor_exposures_use_cross_sectional,
+                    drop_threshold=self.na_config.factor_exposures_drop_threshold
+                )
+
         return self._factor_exposures
 
     def load_factor_returns(self, filename: str = 'factor_returns.csv') -> pd.DataFrame:
         """
-        Load factor returns.
+        Load factor returns with automatic NA handling.
 
         Expected format: CSV with 'date' index and factor columns.
         """
@@ -169,11 +245,20 @@ class DataManager:
             self._factor_returns.index = pd.to_datetime(self._factor_returns.index)
             print(f"Loaded factor returns: {self._factor_returns.shape[0]} dates, {self._factor_returns.shape[1]} factors")
 
+            # Apply NA handling
+            if self.enable_na_handling:
+                self._factor_returns = self.na_handler.handle_timeseries_data(
+                    df=self._factor_returns,
+                    data_type="Factor Returns",
+                    method=self.na_config.factor_returns_method,
+                    max_gap=None  # Use zero fill for missing returns
+                )
+
         return self._factor_returns
 
     def load_factor_covariance(self, filename: str = 'factor_covariance.csv') -> pd.DataFrame:
         """
-        Load factor covariance matrix.
+        Load factor covariance matrix with automatic NA handling and regularization.
 
         Expected format: CSV with 'date' index and factor×factor covariance.
         For simplicity, can also load a single covariance matrix (no date dimension).
@@ -186,11 +271,26 @@ class DataManager:
             ).astype(self.dtype)
             print(f"Loaded factor covariance: {self._factor_covariance.shape}")
 
+            # Apply NA handling and regularization
+            if self.enable_na_handling:
+                # Fill NAs with forward fill
+                self._factor_covariance = self._factor_covariance.ffill()
+
+                # Ensure positive definiteness
+                self._factor_covariance = ensure_positive_definite(self._factor_covariance)
+
+                # Apply shrinkage if configured
+                if self.na_config.factor_covariance_regularization:
+                    self._factor_covariance = apply_shrinkage(
+                        self._factor_covariance,
+                        shrinkage=self.na_config.factor_covariance_shrinkage
+                    )
+
         return self._factor_covariance
 
     def load_specific_variance(self, filename: str = 'specific_variance.csv') -> pd.DataFrame:
         """
-        Load specific (idiosyncratic) variance per security per date.
+        Load specific (idiosyncratic) variance per security per date with automatic NA handling.
 
         Expected format: CSV with 'date' index and ticker columns.
         """
@@ -204,11 +304,31 @@ class DataManager:
             self._specific_variance.index = pd.to_datetime(self._specific_variance.index)
             print(f"Loaded specific variance: {self._specific_variance.shape[0]} dates, {self._specific_variance.shape[1]} securities")
 
+            # Apply NA handling
+            if self.enable_na_handling:
+                self._specific_variance = self.na_handler.handle_timeseries_data(
+                    df=self._specific_variance,
+                    data_type="Specific Variance",
+                    method=self.na_config.specific_variance_method,
+                    max_gap=self.na_config.specific_variance_max_gap,
+                    drop_threshold=self.na_config.specific_variance_drop_threshold,
+                    min_value=1e-8  # Variance must be positive
+                )
+
+                # Use cross-sectional median as fallback if configured
+                if self.na_config.specific_variance_use_cross_sectional and self._specific_variance.isna().any().any():
+                    for date in self._specific_variance.index:
+                        row_median = self._specific_variance.loc[date].median()
+                        if pd.notna(row_median):
+                            self._specific_variance.loc[date] = self._specific_variance.loc[date].fillna(
+                                row_median * self.na_config.specific_variance_safety_factor
+                            )
+
         return self._specific_variance
 
     def load_sector_mapping(self, filename: str = 'sector_mapping.csv') -> pd.DataFrame:
         """
-        Load sector mapping for securities.
+        Load sector mapping for securities with automatic NA handling.
 
         Expected format: CSV with 'ticker' and 'sector' columns.
         """
@@ -217,6 +337,17 @@ class DataManager:
             self._sector_mapping = pd.read_csv(filepath)
             print(f"Loaded sector mapping: {len(self._sector_mapping)} securities, "
                   f"{self._sector_mapping['sector'].nunique()} sectors")
+
+            # Apply NA handling
+            if self.enable_na_handling:
+                # Fill missing sectors with default
+                if 'sector' in self._sector_mapping.columns:
+                    na_count = self._sector_mapping['sector'].isna().sum()
+                    if na_count > 0:
+                        self._sector_mapping['sector'] = self._sector_mapping['sector'].fillna(
+                            self.na_config.sector_mapping_default_sector
+                        )
+                        print(f"  Filled {na_count} missing sectors with '{self.na_config.sector_mapping_default_sector}'")
 
         return self._sector_mapping
 
@@ -275,6 +406,15 @@ class DataManager:
             print(f"Loaded external trades: {len(self._external_trades)} trades, "
                   f"{self._external_trades['date'].nunique()} dates, "
                   f"{self._external_trades['ticker'].nunique()} tickers")
+
+            # Apply NA handling
+            if self.enable_na_handling:
+                self._external_trades = self.na_handler.handle_external_trades(
+                    df=self._external_trades,
+                    strict=self.na_config.external_trades_strict,
+                    allow_price_lookup=self.na_config.external_trades_allow_price_lookup,
+                    prices_df=self._prices  # May be None if prices not loaded yet
+                )
 
             # Show tag summary if tags are present
             if self._external_trades['tag'].notna().any():
@@ -350,6 +490,21 @@ class DataManager:
             self._tickers = prices.columns.tolist()
 
         return self._tickers
+
+    def get_na_handling_report(self) -> str:
+        """
+        Get summary report of all NA handling operations performed.
+
+        Returns:
+        --------
+        str
+            Formatted report showing NA handling statistics for all loaded data
+        """
+        return self.na_handler.get_summary_report()
+
+    def clear_na_reports(self):
+        """Clear all NA handling reports."""
+        self.na_handler.clear_reports()
 
     def get_data_for_date(self, date: pd.Timestamp) -> Dict:
         """

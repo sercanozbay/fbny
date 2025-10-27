@@ -98,3 +98,5 @@ data/
 tmp/
 temp/
 *.tmp
+
+.claude/

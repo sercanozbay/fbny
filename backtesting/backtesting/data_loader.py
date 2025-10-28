@@ -12,7 +12,7 @@ from typing import Dict, Optional, List, Tuple
 import warnings
 
 from .na_handling import (
-    NAHandlingConfig, NAHandler, FillMethod,
+    NAHandlingConfig, NAHandler,
     ensure_positive_definite, apply_shrinkage
 )
 

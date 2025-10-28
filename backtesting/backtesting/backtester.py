@@ -6,7 +6,6 @@ the entire backtest simulation.
 """
 
 import pandas as pd
-import numpy as np
 from typing import Dict, Optional, Literal
 from tqdm import tqdm
 

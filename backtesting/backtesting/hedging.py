@@ -5,7 +5,6 @@ This module implements logic to hedge portfolio beta exposure
 and sector exposures.
 """
 
-import numpy as np
 from typing import Dict, Tuple, Optional
 
 
@@ -164,7 +163,8 @@ class SectorHedger:
     def __init__(
         self,
         target_exposures: Optional[Dict[str, float]] = None,
-        hedge_method: str = 'proportional'
+        hedge_method: str = 'proportional',
+        sector_etf_mapping: Optional[Dict[str, str]] = None
     ):
         """
         Initialize sector hedger.
@@ -175,9 +175,37 @@ class SectorHedger:
             Target sector exposure per sector (default: 0.0 for all)
         hedge_method : str
             Method for hedging: 'proportional' or 'etf'
+        sector_etf_mapping : Dict[str, str], optional
+            Mapping of sector to ETF ticker for ETF hedging method
+            Example: {'Technology': 'XLK', 'Healthcare': 'XLV', ...}
         """
         self.target_exposures = target_exposures or {}
         self.hedge_method = hedge_method
+        self.sector_etf_mapping = sector_etf_mapping or self._get_default_sector_etfs()
+
+    @staticmethod
+    def _get_default_sector_etfs() -> Dict[str, str]:
+        """
+        Get default sector ETF mapping (US market).
+
+        Returns:
+        --------
+        Dict[str, str]
+            Sector -> ETF ticker mapping
+        """
+        return {
+            'Technology': 'XLK',
+            'Healthcare': 'XLV',
+            'Financials': 'XLF',
+            'Energy': 'XLE',
+            'Consumer Discretionary': 'XLY',
+            'Consumer Staples': 'XLP',
+            'Industrials': 'XLI',
+            'Materials': 'XLB',
+            'Real Estate': 'XLRE',
+            'Utilities': 'XLU',
+            'Communication Services': 'XLC'
+        }
 
     def calculate_sector_exposures(
         self,
@@ -298,6 +326,79 @@ class SectorHedger:
 
         return adjustments
 
+    def calculate_hedge_etf(
+        self,
+        positions: Dict[str, float],
+        prices: Dict[str, float],
+        sector_mapping: Dict[str, str]
+    ) -> Dict[str, float]:
+        """
+        Calculate ETF-based hedge adjustments.
+
+        This method uses sector ETFs to hedge sector exposures instead of
+        adjusting individual stock positions.
+
+        Parameters:
+        -----------
+        positions : Dict[str, float]
+            Current positions
+        prices : Dict[str, float]
+            Prices (must include sector ETF prices)
+        sector_mapping : Dict[str, str]
+            Ticker -> sector
+
+        Returns:
+        --------
+        Dict[str, float]
+            ETF hedge positions (ETF ticker -> shares)
+        """
+        # Calculate current sector exposures
+        sector_exposures = self.calculate_sector_exposures(
+            positions, prices, sector_mapping
+        )
+
+        # Calculate total portfolio value
+        total_value = sum(
+            abs(shares * prices.get(ticker, 0.0))
+            for ticker, shares in positions.items()
+        )
+
+        if total_value == 0:
+            return {}
+
+        # Calculate required hedge for each sector using sector ETFs
+        etf_hedges = {}
+
+        for sector, current_exp in sector_exposures.items():
+            target_exp = self.target_exposures.get(sector, 0.0)
+
+            # Calculate notional adjustment needed
+            adjustment_value = (target_exp - current_exp) * total_value
+
+            # Get sector ETF ticker
+            etf_ticker = self.sector_etf_mapping.get(sector)
+
+            if etf_ticker is None:
+                # Skip if no ETF mapping for this sector
+                continue
+
+            # Get ETF price
+            etf_price = prices.get(etf_ticker)
+
+            if etf_price is None or etf_price == 0:
+                # Skip if ETF price not available
+                continue
+
+            # Calculate ETF shares needed
+            # Negative adjustment_value means we need to short the ETF to reduce exposure
+            # Positive adjustment_value means we need to long the ETF to increase exposure
+            etf_shares = -adjustment_value / etf_price
+
+            if etf_shares != 0:
+                etf_hedges[etf_ticker] = etf_hedges.get(etf_ticker, 0.0) + etf_shares
+
+        return etf_hedges
+
     def apply_hedge(
         self,
         positions: Dict[str, float],
@@ -312,7 +413,7 @@ class SectorHedger:
         positions : Dict[str, float]
             Current positions
         prices : Dict[str, float]
-            Prices
+            Prices (must include sector ETF prices if using 'etf' method)
         sector_mapping : Dict[str, str]
             Ticker -> sector
 
@@ -325,29 +426,48 @@ class SectorHedger:
             positions, prices, sector_mapping
         )
 
+        hedged_positions = positions.copy()
+
         if self.hedge_method == 'proportional':
+            # Proportional method: adjust individual stock positions
             adjustments = self.calculate_hedge_proportional(
                 positions, prices, sector_mapping
             )
 
-            hedged_positions = positions.copy()
             for ticker, adj in adjustments.items():
                 hedged_positions[ticker] = hedged_positions.get(ticker, 0.0) + adj
 
+            hedge_info = {
+                'method': 'proportional',
+                'current_exposures': current_exposures,
+                'adjustments': adjustments
+            }
+
+        elif self.hedge_method == 'etf':
+            # ETF method: add sector ETF positions
+            etf_hedges = self.calculate_hedge_etf(
+                positions, prices, sector_mapping
+            )
+
+            for etf_ticker, shares in etf_hedges.items():
+                hedged_positions[etf_ticker] = hedged_positions.get(etf_ticker, 0.0) + shares
+
+            hedge_info = {
+                'method': 'etf',
+                'current_exposures': current_exposures,
+                'etf_hedges': etf_hedges,
+                'etf_mapping': self.sector_etf_mapping
+            }
+
         else:
-            # ETF method not implemented yet
-            hedged_positions = positions.copy()
-            adjustments = {}
+            raise ValueError(f"Unknown hedge method: {self.hedge_method}. "
+                           f"Must be 'proportional' or 'etf'")
 
         # Calculate final exposures
         final_exposures = self.calculate_sector_exposures(
             hedged_positions, prices, sector_mapping
         )
 
-        hedge_info = {
-            'current_exposures': current_exposures,
-            'final_exposures': final_exposures,
-            'adjustments': adjustments
-        }
+        hedge_info['final_exposures'] = final_exposures
 
         return hedged_positions, hedge_info

@@ -30,6 +30,9 @@ class BacktestConfig:
     enable_sector_hedge: bool = False
     beta_hedge_instrument: str = 'SPY'  # Ticker for beta hedge (future/ETF)
     target_beta: float = 0.0  # Target net portfolio beta
+    sector_hedge_method: str = 'proportional'  # 'proportional' or 'etf'
+    sector_target_exposures: Optional[Dict[str, float]] = None  # Target exposure per sector
+    sector_etf_mapping: Optional[Dict[str, str]] = None  # Sector -> ETF ticker for ETF hedging
 
     # Transaction costs
     tc_power: float = 1.5  # Power in transaction cost function: cost = a * (qty/adv)^power

@@ -63,7 +63,11 @@ class Backtester:
             target_beta=config.target_beta
         ) if config.enable_beta_hedge else None
 
-        self.sector_hedger = SectorHedger() if config.enable_sector_hedge else None
+        self.sector_hedger = SectorHedger(
+            target_exposures=config.sector_target_exposures,
+            hedge_method=config.sector_hedge_method,
+            sector_etf_mapping=config.sector_etf_mapping
+        ) if config.enable_sector_hedge else None
 
         self.executor = TradeExecutor(
             cost_model=self.cost_model,

@@ -38,6 +38,12 @@ from .na_handling import (
     ValidationLevel
 )
 
+# Large data loading
+from .data_loader import (
+    LargeDataLoader,
+    convert_to_backtester_format
+)
+
 __all__ = [
     # Core
     'Backtester',
@@ -62,5 +68,8 @@ __all__ = [
     # NA handling
     'NAHandlingConfig',
     'FillMethod',
-    'ValidationLevel'
+    'ValidationLevel',
+    # Large data loading
+    'LargeDataLoader',
+    'convert_to_backtester_format'
 ]

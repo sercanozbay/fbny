@@ -3,12 +3,16 @@ Data loading and management module.
 
 This module handles loading all required data from CSV files with
 memory-efficient operations and lazy loading where possible.
+
+Also provides LargeDataLoader for institutional-grade datasets with
+5000+ securities, supporting corporate action adjustments and time-varying
+classifications.
 """
 
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from typing import Dict, Optional, List, Tuple
+from typing import Dict, Optional, List, Tuple, Union
 import warnings
 
 from .na_handling import (
@@ -593,3 +597,781 @@ class DataManager:
             issues.append("ADV contains zero or negative values")
 
         return issues
+
+
+class LargeDataLoader:
+    """
+    Loader for large institutional datasets with ticker+date indexing.
+
+    Handles:
+    - Large price files (5000+ securities)
+    - ADV (Average Daily Volume) data
+    - Beta data
+    - Price adjustments/corporate actions
+    - Date-based sector mappings
+    - Date-based factor exposures
+    - Date-based factor covariances
+    """
+
+    def __init__(self, data_dir: str, use_float32: bool = True):
+        """
+        Initialize large data loader.
+
+        Parameters:
+        -----------
+        data_dir : str
+            Directory containing large data files
+        use_float32 : bool
+            Use float32 for memory efficiency (recommended for large datasets)
+        """
+        self.data_dir = Path(data_dir)
+        self.dtype = np.float32 if use_float32 else np.float64
+
+    def load_prices_with_adjustments(
+        self,
+        universe: List[str],
+        start_date: str,
+        end_date: str,
+        prices_file: str = 'prices_large.parquet',
+        adjustments_file: Optional[str] = 'price_adjustments.parquet',
+        apply_adjustments: bool = True
+    ) -> pd.DataFrame:
+        """
+        Load raw prices and apply corporate action adjustments.
+
+        Expected format for prices file:
+        - Index: MultiIndex (date, ticker) or columns: [date, ticker, price]
+        - Parquet format recommended for large files
+
+        Expected format for adjustments file:
+        - Columns: [date, ticker, adjustment_factor]
+        - adjustment_factor: Multiplier to apply (e.g., 0.5 for 2-for-1 split)
+
+        Parameters:
+        -----------
+        universe : List[str]
+            List of ticker symbols to load
+        start_date : str
+            Start date (YYYY-MM-DD)
+        end_date : str
+            End date (YYYY-MM-DD)
+        prices_file : str
+            Name of prices file in data_dir
+        adjustments_file : str, optional
+            Name of adjustments file (None to skip adjustments)
+        apply_adjustments : bool
+            Whether to apply adjustments
+
+        Returns:
+        --------
+        pd.DataFrame
+            Prices DataFrame with dates as index, tickers as columns
+        """
+        filepath = self.data_dir / prices_file
+
+        # Load prices file
+        print(f"Loading prices from {filepath}...")
+
+        if filepath.suffix == '.parquet':
+            # Load parquet (efficient for large files)
+            df = pd.read_parquet(filepath)
+        elif filepath.suffix == '.csv':
+            # Load CSV with date parsing
+            df = pd.read_csv(filepath, parse_dates=['date'])
+        else:
+            raise ValueError(f"Unsupported file format: {filepath.suffix}")
+
+        # Handle different input formats
+        if isinstance(df.index, pd.MultiIndex):
+            # Format: MultiIndex (date, ticker) with 'price' column
+            df = df.reset_index()
+
+        # Ensure we have required columns
+        if 'date' not in df.columns or 'ticker' not in df.columns:
+            raise ValueError("Prices file must have 'date' and 'ticker' columns")
+
+        # Convert date column to datetime
+        df['date'] = pd.to_datetime(df['date'])
+        start_dt = pd.to_datetime(start_date)
+        end_dt = pd.to_datetime(end_date)
+
+        # Filter by date range
+        df = df[(df['date'] >= start_dt) & (df['date'] <= end_dt)]
+
+        # Filter by universe
+        df = df[df['ticker'].isin(universe)]
+
+        print(f"  Filtered to {len(df['ticker'].unique())} tickers, "
+              f"{len(df['date'].unique())} dates, "
+              f"{len(df)} rows")
+
+        # Get price column name
+        price_col = 'price' if 'price' in df.columns else 'close'
+
+        if price_col not in df.columns:
+            # Try to find a suitable column
+            numeric_cols = df.select_dtypes(include=[np.number]).columns
+            if len(numeric_cols) > 0:
+                price_col = numeric_cols[0]
+                warnings.warn(f"Using '{price_col}' as price column")
+            else:
+                raise ValueError("Could not find price column in data")
+
+        # Apply adjustments if requested
+        if apply_adjustments and adjustments_file is not None:
+            adj_filepath = self.data_dir / adjustments_file
+
+            if adj_filepath.exists():
+                print(f"Loading price adjustments from {adj_filepath}...")
+                df = self._apply_price_adjustments(df, adj_filepath, price_col,
+                                                   start_date, end_date, universe)
+            else:
+                warnings.warn(f"Adjustments file not found: {adj_filepath}")
+
+        # Pivot to date x ticker format
+        prices = df.pivot(index='date', columns='ticker', values=price_col)
+
+        # Sort and ensure correct dtype
+        prices = prices.sort_index()
+        prices = prices.astype(self.dtype)
+
+        print(f"✓ Loaded prices: {prices.shape[0]} dates × {prices.shape[1]} tickers")
+
+        return prices
+
+    def _apply_price_adjustments(
+        self,
+        prices_df: pd.DataFrame,
+        adj_filepath: Path,
+        price_col: str,
+        start_date: str,
+        end_date: str,
+        universe: List[str]
+    ) -> pd.DataFrame:
+        """
+        Apply corporate action adjustments to prices.
+
+        Adjustments are applied backward from the adjustment date.
+        E.g., for a 2-for-1 split on 2023-06-15:
+        - Prices on/after 2023-06-15: No adjustment
+        - Prices before 2023-06-15: Multiply by 0.5
+        """
+        # Load adjustments
+        if adj_filepath.suffix == '.parquet':
+            adj_df = pd.read_parquet(adj_filepath)
+        else:
+            adj_df = pd.read_csv(adj_filepath, parse_dates=['date'])
+
+        adj_df['date'] = pd.to_datetime(adj_df['date'])
+
+        # Filter adjustments by date range and universe
+        start_dt = pd.to_datetime(start_date)
+        end_dt = pd.to_datetime(end_date)
+
+        # Include adjustments before start_date (they affect our prices)
+        adj_df = adj_df[adj_df['date'] <= end_dt]
+        adj_df = adj_df[adj_df['ticker'].isin(universe)]
+
+        if len(adj_df) == 0:
+            print("  No adjustments found for this period")
+            return prices_df
+
+        print(f"  Applying {len(adj_df)} price adjustments...")
+
+        # Sort adjustments by date (oldest first)
+        adj_df = adj_df.sort_values('date')
+
+        # Create adjusted price column
+        prices_df['adjusted_price'] = prices_df[price_col]
+
+        # Apply adjustments backward in time
+        for ticker in adj_df['ticker'].unique():
+            ticker_adjs = adj_df[adj_df['ticker'] == ticker].sort_values('date')
+            ticker_mask = prices_df['ticker'] == ticker
+
+            # Calculate cumulative adjustment factor for each date
+            for _, adj_row in ticker_adjs.iterrows():
+                adj_date = adj_row['date']
+                adj_factor = adj_row['adjustment_factor']
+
+                # Apply to prices before adjustment date
+                date_mask = prices_df['date'] < adj_date
+                mask = ticker_mask & date_mask
+
+                prices_df.loc[mask, 'adjusted_price'] *= adj_factor
+
+        # Replace original price with adjusted price
+        prices_df[price_col] = prices_df['adjusted_price']
+        prices_df = prices_df.drop('adjusted_price', axis=1)
+
+        return prices_df
+
+    def load_adv(
+        self,
+        universe: List[str],
+        start_date: str,
+        end_date: str,
+        adv_file: str = 'adv_large.parquet'
+    ) -> pd.DataFrame:
+        """
+        Load Average Daily Volume data for universe and date range.
+
+        Expected format:
+        - Index: MultiIndex (date, ticker) or columns: [date, ticker, adv]
+
+        Parameters:
+        -----------
+        universe : List[str]
+            List of tickers
+        start_date : str
+            Start date
+        end_date : str
+            End date
+        adv_file : str
+            Name of ADV file
+
+        Returns:
+        --------
+        pd.DataFrame
+            ADV DataFrame with dates as index, tickers as columns
+        """
+        filepath = self.data_dir / adv_file
+
+        print(f"Loading ADV from {filepath}...")
+
+        # Load file
+        if filepath.suffix == '.parquet':
+            df = pd.read_parquet(filepath)
+        elif filepath.suffix == '.csv':
+            df = pd.read_csv(filepath, parse_dates=['date'])
+        else:
+            raise ValueError(f"Unsupported file format: {filepath.suffix}")
+
+        # Handle MultiIndex
+        if isinstance(df.index, pd.MultiIndex):
+            df = df.reset_index()
+
+        # Convert and filter
+        df['date'] = pd.to_datetime(df['date'])
+        start_dt = pd.to_datetime(start_date)
+        end_dt = pd.to_datetime(end_date)
+
+        df = df[(df['date'] >= start_dt) & (df['date'] <= end_dt)]
+        df = df[df['ticker'].isin(universe)]
+
+        # Get ADV column
+        adv_col = 'adv' if 'adv' in df.columns else 'volume'
+        if adv_col not in df.columns:
+            numeric_cols = df.select_dtypes(include=[np.number]).columns
+            if len(numeric_cols) > 0:
+                adv_col = numeric_cols[0]
+                warnings.warn(f"Using '{adv_col}' as ADV column")
+            else:
+                raise ValueError("Could not find ADV column")
+
+        # Pivot to date x ticker
+        adv = df.pivot(index='date', columns='ticker', values=adv_col)
+        adv = adv.sort_index()
+        adv = adv.astype(self.dtype)
+
+        print(f"✓ Loaded ADV: {adv.shape[0]} dates × {adv.shape[1]} tickers")
+
+        return adv
+
+    def load_betas(
+        self,
+        universe: List[str],
+        start_date: str,
+        end_date: str,
+        beta_file: str = 'betas_large.parquet'
+    ) -> pd.DataFrame:
+        """
+        Load beta data for universe and date range.
+
+        Expected format:
+        - Index: MultiIndex (date, ticker) or columns: [date, ticker, beta]
+
+        Parameters:
+        -----------
+        universe : List[str]
+            List of tickers
+        start_date : str
+            Start date
+        end_date : str
+            End date
+        beta_file : str
+            Name of beta file
+
+        Returns:
+        --------
+        pd.DataFrame
+            Beta DataFrame with dates as index, tickers as columns
+        """
+        filepath = self.data_dir / beta_file
+
+        print(f"Loading betas from {filepath}...")
+
+        # Load file
+        if filepath.suffix == '.parquet':
+            df = pd.read_parquet(filepath)
+        elif filepath.suffix == '.csv':
+            df = pd.read_csv(filepath, parse_dates=['date'])
+        else:
+            raise ValueError(f"Unsupported file format: {filepath.suffix}")
+
+        # Handle MultiIndex
+        if isinstance(df.index, pd.MultiIndex):
+            df = df.reset_index()
+
+        # Convert and filter
+        df['date'] = pd.to_datetime(df['date'])
+        start_dt = pd.to_datetime(start_date)
+        end_dt = pd.to_datetime(end_date)
+
+        df = df[(df['date'] >= start_dt) & (df['date'] <= end_dt)]
+        df = df[df['ticker'].isin(universe)]
+
+        # Get beta column
+        beta_col = 'beta' if 'beta' in df.columns else df.select_dtypes(include=[np.number]).columns[0]
+
+        # Pivot to date x ticker
+        betas = df.pivot(index='date', columns='ticker', values=beta_col)
+        betas = betas.sort_index()
+        betas = betas.astype(self.dtype)
+
+        print(f"✓ Loaded betas: {betas.shape[0]} dates × {betas.shape[1]} tickers")
+
+        return betas
+
+    def load_sector_mapping_with_dates(
+        self,
+        universe: List[str],
+        date: str,
+        sector_file: str = 'sector_mapping_dated.parquet'
+    ) -> pd.DataFrame:
+        """
+        Load sector mapping with date support (sectors can change over time).
+
+        Expected format:
+        - Columns: [date, ticker, sector] or [effective_date, ticker, sector]
+        - Multiple rows per ticker for sector changes
+
+        Parameters:
+        -----------
+        universe : List[str]
+            List of tickers
+        date : str
+            Date for which to get sector mapping
+        sector_file : str
+            Name of sector mapping file
+
+        Returns:
+        --------
+        pd.DataFrame
+            DataFrame with columns [ticker, sector]
+        """
+        filepath = self.data_dir / sector_file
+
+        print(f"Loading sector mapping from {filepath}...")
+
+        # Load file
+        if filepath.suffix == '.parquet':
+            df = pd.read_parquet(filepath)
+        elif filepath.suffix == '.csv':
+            df = pd.read_csv(filepath, parse_dates=[0])
+        else:
+            raise ValueError(f"Unsupported file format: {filepath.suffix}")
+
+        # Identify date column
+        date_col = 'date' if 'date' in df.columns else 'effective_date'
+        if date_col not in df.columns:
+            # Assume static sector mapping (no dates)
+            df = df[df['ticker'].isin(universe)]
+            print(f"✓ Loaded sector mapping: {len(df)} tickers (static)")
+            return df[['ticker', 'sector']]
+
+        # Convert date
+        df[date_col] = pd.to_datetime(df[date_col])
+        target_date = pd.to_datetime(date)
+
+        # Filter by universe
+        df = df[df['ticker'].isin(universe)]
+
+        # Get sector as of target date (use most recent effective date <= target)
+        df = df[df[date_col] <= target_date]
+
+        # Keep only most recent entry per ticker
+        df = df.sort_values(date_col)
+        df = df.groupby('ticker').tail(1)
+
+        print(f"✓ Loaded sector mapping: {len(df)} tickers as of {date}")
+
+        return df[['ticker', 'sector']]
+
+    def load_factor_exposures_with_dates(
+        self,
+        universe: List[str],
+        start_date: str,
+        end_date: str,
+        exposures_file: str = 'factor_exposures_large.parquet'
+    ) -> pd.DataFrame:
+        """
+        Load factor exposures for universe and date range.
+
+        Expected format:
+        - Index: MultiIndex (date, ticker)
+        - Columns: Factor names (Factor1, Factor2, etc.)
+
+        Parameters:
+        -----------
+        universe : List[str]
+            List of tickers
+        start_date : str
+            Start date
+        end_date : str
+            End date
+        exposures_file : str
+            Name of exposures file
+
+        Returns:
+        --------
+        pd.DataFrame
+            Factor exposures with MultiIndex (date, ticker)
+        """
+        filepath = self.data_dir / exposures_file
+
+        print(f"Loading factor exposures from {filepath}...")
+
+        # Load file
+        if filepath.suffix == '.parquet':
+            df = pd.read_parquet(filepath)
+        elif filepath.suffix == '.csv':
+            df = pd.read_csv(filepath, parse_dates=[0])
+        else:
+            raise ValueError(f"Unsupported file format: {filepath.suffix}")
+
+        # Handle different formats
+        if not isinstance(df.index, pd.MultiIndex):
+            # Create MultiIndex from date and ticker columns
+            if 'date' in df.columns and 'ticker' in df.columns:
+                df['date'] = pd.to_datetime(df['date'])
+                df = df.set_index(['date', 'ticker'])
+            else:
+                raise ValueError("Expected MultiIndex or date/ticker columns")
+
+        # Filter by date range
+        start_dt = pd.to_datetime(start_date)
+        end_dt = pd.to_datetime(end_date)
+
+        dates = df.index.get_level_values(0)
+        df = df[(dates >= start_dt) & (dates <= end_dt)]
+
+        # Filter by universe
+        tickers = df.index.get_level_values(1)
+        df = df[tickers.isin(universe)]
+
+        # Sort index
+        df = df.sort_index()
+        df = df.astype(self.dtype)
+
+        n_dates = len(df.index.get_level_values(0).unique())
+        n_tickers = len(df.index.get_level_values(1).unique())
+        n_factors = df.shape[1]
+
+        print(f"✓ Loaded factor exposures: {n_dates} dates × {n_tickers} tickers × {n_factors} factors")
+
+        return df
+
+    def load_factor_covariance_with_dates(
+        self,
+        start_date: str,
+        end_date: str,
+        covariance_file: str = 'factor_covariance_dated.parquet'
+    ) -> Union[pd.DataFrame, Dict[pd.Timestamp, pd.DataFrame]]:
+        """
+        Load factor covariance matrices.
+
+        Expected format:
+        - Time-varying: MultiIndex (date, factor1) with factor columns
+        - Static: factor × factor matrix
+
+        Parameters:
+        -----------
+        start_date : str
+            Start date
+        end_date : str
+            End date
+        covariance_file : str
+            Name of covariance file
+
+        Returns:
+        --------
+        Union[pd.DataFrame, Dict[pd.Timestamp, pd.DataFrame]]
+            If time-varying: Dict mapping date -> covariance matrix
+            If static: Single covariance DataFrame
+        """
+        filepath = self.data_dir / covariance_file
+
+        print(f"Loading factor covariance from {filepath}...")
+
+        # Load file
+        if filepath.suffix == '.parquet':
+            df = pd.read_parquet(filepath)
+        elif filepath.suffix == '.csv':
+            df = pd.read_csv(filepath, parse_dates=[0] if 'date' in pd.read_csv(filepath, nrows=1).columns else None)
+        else:
+            raise ValueError(f"Unsupported file format: {filepath.suffix}")
+
+        # Check if time-varying
+        has_date = 'date' in df.columns or (isinstance(df.index, pd.MultiIndex) and 'date' in df.index.names)
+
+        if not has_date:
+            # Static covariance matrix
+            print(f"✓ Loaded static factor covariance: {df.shape}")
+            return df.astype(self.dtype)
+
+        # Time-varying covariance
+        if not isinstance(df.index, pd.MultiIndex):
+            # Create MultiIndex
+            if 'date' in df.columns:
+                df['date'] = pd.to_datetime(df['date'])
+                # Assume first column after date is factor index
+                factor_col = df.columns[1]
+                df = df.set_index(['date', factor_col])
+            else:
+                raise ValueError("Could not determine covariance structure")
+
+        # Filter by date range
+        start_dt = pd.to_datetime(start_date)
+        end_dt = pd.to_datetime(end_date)
+
+        dates = df.index.get_level_values(0)
+        df = df[(dates >= start_dt) & (dates <= end_dt)]
+
+        # Convert to dict of covariance matrices by date
+        cov_by_date = {}
+        for date in df.index.get_level_values(0).unique():
+            cov_matrix = df.loc[date]
+            cov_by_date[date] = cov_matrix.astype(self.dtype)
+
+        print(f"✓ Loaded time-varying factor covariance: {len(cov_by_date)} dates")
+
+        return cov_by_date
+
+    def load_specific_variance(
+        self,
+        universe: List[str],
+        start_date: str,
+        end_date: str,
+        variance_file: str = 'specific_variance_large.parquet'
+    ) -> pd.DataFrame:
+        """
+        Load specific (idiosyncratic) variance data.
+
+        Expected format:
+        - Index: MultiIndex (date, ticker) or columns: [date, ticker, variance]
+
+        Parameters:
+        -----------
+        universe : List[str]
+            List of tickers
+        start_date : str
+            Start date
+        end_date : str
+            End date
+        variance_file : str
+            Name of variance file
+
+        Returns:
+        --------
+        pd.DataFrame
+            Variance DataFrame with dates as index, tickers as columns
+        """
+        filepath = self.data_dir / variance_file
+
+        print(f"Loading specific variance from {filepath}...")
+
+        # Load file
+        if filepath.suffix == '.parquet':
+            df = pd.read_parquet(filepath)
+        elif filepath.suffix == '.csv':
+            df = pd.read_csv(filepath, parse_dates=['date'])
+        else:
+            raise ValueError(f"Unsupported file format: {filepath.suffix}")
+
+        # Handle MultiIndex
+        if isinstance(df.index, pd.MultiIndex):
+            df = df.reset_index()
+
+        # Convert and filter
+        df['date'] = pd.to_datetime(df['date'])
+        start_dt = pd.to_datetime(start_date)
+        end_dt = pd.to_datetime(end_date)
+
+        df = df[(df['date'] >= start_dt) & (df['date'] <= end_dt)]
+        df = df[df['ticker'].isin(universe)]
+
+        # Get variance column
+        var_col = 'variance' if 'variance' in df.columns else 'specific_variance'
+        if var_col not in df.columns:
+            numeric_cols = df.select_dtypes(include=[np.number]).columns
+            if len(numeric_cols) > 0:
+                var_col = numeric_cols[0]
+                warnings.warn(f"Using '{var_col}' as variance column")
+
+        # Pivot to date x ticker
+        variance = df.pivot(index='date', columns='ticker', values=var_col)
+        variance = variance.sort_index()
+        variance = variance.astype(self.dtype)
+
+        print(f"✓ Loaded specific variance: {variance.shape[0]} dates × {variance.shape[1]} tickers")
+
+        return variance
+
+    def save_subset(
+        self,
+        data: Union[pd.DataFrame, Dict],
+        output_file: str,
+        format: str = 'parquet'
+    ):
+        """
+        Save extracted subset to file.
+
+        Parameters:
+        -----------
+        data : Union[pd.DataFrame, Dict]
+            Data to save
+        output_file : str
+            Output filename
+        format : str
+            'parquet' or 'csv'
+        """
+        output_path = self.data_dir / output_file
+
+        if isinstance(data, dict):
+            # Save dictionary (e.g., time-varying covariance)
+            import pickle
+            with open(output_path.with_suffix('.pkl'), 'wb') as f:
+                pickle.dump(data, f)
+            print(f"✓ Saved to {output_path.with_suffix('.pkl')}")
+        elif format == 'parquet':
+            data.to_parquet(output_path)
+            print(f"✓ Saved to {output_path}")
+        elif format == 'csv':
+            data.to_csv(output_path)
+            print(f"✓ Saved to {output_path}")
+        else:
+            raise ValueError(f"Unsupported format: {format}")
+
+
+def convert_to_backtester_format(
+    prices: pd.DataFrame,
+    adv: pd.DataFrame,
+    betas: pd.DataFrame,
+    sector_mapping: pd.DataFrame,
+    factor_exposures: Optional[pd.DataFrame] = None,
+    factor_returns: Optional[pd.DataFrame] = None,
+    factor_covariance: Optional[Union[pd.DataFrame, Dict]] = None,
+    specific_variance: Optional[pd.DataFrame] = None,
+    output_dir: str = './backtester_data'
+) -> Dict[str, str]:
+    """
+    Convert loaded data to backtester-compatible format and save.
+
+    Parameters:
+    -----------
+    prices : pd.DataFrame
+        Prices (date × ticker)
+    adv : pd.DataFrame
+        ADV (date × ticker)
+    betas : pd.DataFrame
+        Betas (date × ticker)
+    sector_mapping : pd.DataFrame
+        Sector mapping (ticker, sector columns)
+    factor_exposures : pd.DataFrame, optional
+        Factor exposures (MultiIndex: date, ticker)
+    factor_returns : pd.DataFrame, optional
+        Factor returns (date × factor)
+    factor_covariance : Union[pd.DataFrame, Dict], optional
+        Factor covariance (factor × factor or time-varying)
+    specific_variance : pd.DataFrame, optional
+        Specific variance (date × ticker)
+    output_dir : str
+        Output directory
+
+    Returns:
+    --------
+    Dict[str, str]
+        Mapping of data type -> output file path
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    saved_files = {}
+
+    # Save prices
+    prices_file = output_path / 'prices.csv'
+    prices.to_csv(prices_file)
+    saved_files['prices'] = str(prices_file)
+    print(f"✓ Saved prices to {prices_file}")
+
+    # Save ADV
+    adv_file = output_path / 'adv.csv'
+    adv.to_csv(adv_file)
+    saved_files['adv'] = str(adv_file)
+    print(f"✓ Saved ADV to {adv_file}")
+
+    # Save betas
+    betas_file = output_path / 'betas.csv'
+    betas.to_csv(betas_file)
+    saved_files['betas'] = str(betas_file)
+    print(f"✓ Saved betas to {betas_file}")
+
+    # Save sector mapping
+    sector_file = output_path / 'sector_mapping.csv'
+    sector_mapping.to_csv(sector_file, index=False)
+    saved_files['sector_mapping'] = str(sector_file)
+    print(f"✓ Saved sector mapping to {sector_file}")
+
+    # Save factor exposures if provided
+    if factor_exposures is not None:
+        exposures_file = output_path / 'factor_exposures.csv'
+        factor_exposures.to_csv(exposures_file)
+        saved_files['factor_exposures'] = str(exposures_file)
+        print(f"✓ Saved factor exposures to {exposures_file}")
+
+    # Save factor returns if provided
+    if factor_returns is not None:
+        returns_file = output_path / 'factor_returns.csv'
+        factor_returns.to_csv(returns_file)
+        saved_files['factor_returns'] = str(returns_file)
+        print(f"✓ Saved factor returns to {returns_file}")
+
+    # Save factor covariance if provided
+    if factor_covariance is not None:
+        if isinstance(factor_covariance, dict):
+            # Time-varying: save as pickle
+            cov_file = output_path / 'factor_covariance.pkl'
+            import pickle
+            with open(cov_file, 'wb') as f:
+                pickle.dump(factor_covariance, f)
+            saved_files['factor_covariance'] = str(cov_file)
+            print(f"✓ Saved time-varying factor covariance to {cov_file}")
+        else:
+            # Static: save as CSV
+            cov_file = output_path / 'factor_covariance.csv'
+            factor_covariance.to_csv(cov_file)
+            saved_files['factor_covariance'] = str(cov_file)
+            print(f"✓ Saved factor covariance to {cov_file}")
+
+    # Save specific variance if provided
+    if specific_variance is not None:
+        var_file = output_path / 'specific_variance.csv'
+        specific_variance.to_csv(var_file)
+        saved_files['specific_variance'] = str(var_file)
+        print(f"✓ Saved specific variance to {var_file}")
+
+    print(f"\n✓ All data saved to {output_path}")
+    print(f"  Use: DataManager('{output_dir}') to load in backtester")
+
+    return saved_files

@@ -70,6 +70,7 @@ class DataManager:
         self._specific_variance: Optional[pd.DataFrame] = None
         self._sector_mapping: Optional[pd.DataFrame] = None
         self._external_trades: Optional[pd.DataFrame] = None
+        self._corporate_actions: Optional[pd.DataFrame] = None
 
         self._date_range: Optional[Tuple[pd.Timestamp, pd.Timestamp]] = None
         self._tickers: Optional[List[str]] = None
@@ -427,6 +428,74 @@ class DataManager:
 
         return self._external_trades
 
+    def load_corporate_actions(self, filename: str = 'corporate_actions.csv') -> pd.DataFrame:
+        """
+        Load corporate actions (splits and dividends) from CSV.
+
+        Expected format: CSV with columns:
+        - date: Ex-date for the corporate action
+        - ticker: Security ticker
+        - action_type: 'split' or 'dividend'
+        - value: Split ratio (e.g., 2.0 for 2-for-1) or dividend amount per share
+
+        Returns:
+        --------
+        pd.DataFrame
+            DataFrame with MultiIndex (date, ticker) and columns [action_type, value]
+
+        Example CSV:
+        ------------
+        date,ticker,action_type,value
+        2023-06-15,AAPL,split,2.0
+        2023-09-01,MSFT,dividend,0.75
+
+        Notes:
+        ------
+        Split values:
+        - 2.0 = 2-for-1 split (shares double)
+        - 0.5 = 1-for-2 reverse split (shares halve)
+
+        Dividend values:
+        - Dollar amount per share (e.g., 0.75 = $0.75 per share)
+        """
+        if self._corporate_actions is None:
+            filepath = self.data_dir / filename
+
+            if not filepath.exists():
+                warnings.warn(f"Corporate actions file not found: {filepath}")
+                # Return empty DataFrame with correct structure
+                self._corporate_actions = pd.DataFrame(
+                    columns=['action_type', 'value']
+                )
+                self._corporate_actions.index = pd.MultiIndex.from_tuples(
+                    [], names=['date', 'ticker']
+                )
+                return self._corporate_actions
+
+            # Load CSV
+            df = pd.read_csv(filepath, parse_dates=['date'])
+            df['date'] = pd.to_datetime(df['date'])
+
+            # Validate required columns
+            required_cols = ['date', 'ticker', 'action_type', 'value']
+            missing_cols = [col for col in required_cols if col not in df.columns]
+            if missing_cols:
+                raise ValueError(
+                    f"Corporate actions CSV missing required columns: {missing_cols}. "
+                    f"Required: {required_cols}"
+                )
+
+            # Set MultiIndex
+            df = df.set_index(['date', 'ticker'])
+
+            self._corporate_actions = df[['action_type', 'value']]
+
+            print(f"Loaded corporate actions: {len(df)} actions")
+            print(f"  Splits: {sum(df['action_type'] == 'split')}")
+            print(f"  Dividends: {sum(df['action_type'] == 'dividend')}")
+
+        return self._corporate_actions
+
     def get_external_trades_by_date(self) -> Dict[pd.Timestamp, Dict[str, List[Dict]]]:
         """
         Convert external trades DataFrame to the format expected by Use Case 3.
@@ -553,6 +622,10 @@ class DataManager:
         if self._sector_mapping is not None:
             data['sector_mapping'] = self._sector_mapping.set_index('ticker')['sector'].to_dict()
 
+        # Corporate actions for this date
+        if self._corporate_actions is not None and date in self._corporate_actions.index.get_level_values(0):
+            data['corporate_actions'] = self._corporate_actions.loc[date]
+
         return data
 
     def validate_data(self) -> List[str]:
@@ -634,10 +707,13 @@ class LargeDataLoader:
         end_date: str,
         prices_file: str = 'prices_large.parquet',
         adjustments_file: Optional[str] = 'price_adjustments.parquet',
-        apply_adjustments: bool = True
+        apply_adjustments: bool = False
     ) -> pd.DataFrame:
         """
-        Load raw prices and apply corporate action adjustments.
+        Load raw prices and optionally apply corporate action adjustments.
+
+        **RECOMMENDED**: Load raw prices (apply_adjustments=False) and use corporate
+        actions in the backtester to handle splits/dividends properly during simulation.
 
         Expected format for prices file:
         - Index: MultiIndex (date, ticker) or columns: [date, ticker, price]
@@ -645,7 +721,7 @@ class LargeDataLoader:
 
         Expected format for adjustments file:
         - Columns: [date, ticker, adjustment_factor]
-        - adjustment_factor: Multiplier to apply (e.g., 0.5 for 2-for-1 split)
+        - adjustment_factor: Multiplier to apply backward (e.g., 0.5 for 2-for-1 split)
 
         Parameters:
         -----------
@@ -660,12 +736,20 @@ class LargeDataLoader:
         adjustments_file : str, optional
             Name of adjustments file (None to skip adjustments)
         apply_adjustments : bool
-            Whether to apply adjustments
+            Whether to apply backward adjustments to prices (default: False)
+            Set to False and use corporate_actions in backtester instead
 
         Returns:
         --------
         pd.DataFrame
             Prices DataFrame with dates as index, tickers as columns
+
+        Notes:
+        ------
+        For backtesting with proper corporate action handling:
+        1. Load raw prices (apply_adjustments=False)
+        2. Convert adjustments to corporate actions using convert_adjustments_to_corporate_actions()
+        3. Load corporate actions in backtester
         """
         filepath = self.data_dir / prices_file
 

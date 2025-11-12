@@ -182,6 +182,12 @@ class Backtester:
         except Exception as e:
             print(f"Warning: Could not load factor model data: {e}")
 
+        # Load corporate actions if available
+        try:
+            self.data_manager.load_corporate_actions()
+        except Exception as e:
+            print(f"Note: No corporate actions loaded: {e}")
+
     def _initialize_portfolio(self, start_date: pd.Timestamp):
         """Initialize portfolio state."""
         prices_data = self.data_manager.load_prices()
@@ -231,6 +237,10 @@ class Backtester:
 
         if 'prices' not in day_data:
             return  # Skip if no price data
+
+        # Apply corporate actions BEFORE trading (splits and dividends)
+        if 'corporate_actions' in day_data:
+            self._apply_corporate_actions(date, day_data['corporate_actions'])
 
         prices = day_data['prices']
         adv = day_data.get('adv', {})
@@ -653,6 +663,56 @@ class Backtester:
 
         # Update previous prices for next day
         self.prev_prices = prices
+
+    def _apply_corporate_actions(self, date: pd.Timestamp, actions_df: pd.DataFrame):
+        """
+        Apply corporate actions (splits and dividends) at the start of the trading day.
+
+        Corporate actions are applied BEFORE any trading:
+        - Splits: Adjust share positions by split ratio
+        - Dividends: Add cash payments based on positions held
+
+        Parameters:
+        -----------
+        date : pd.Timestamp
+            Current trading date (ex-date for corporate actions)
+        actions_df : pd.DataFrame
+            DataFrame with columns [action_type, value] and ticker as index
+        """
+        if actions_df.empty:
+            return
+
+        # Get current portfolio state
+        positions = self.state.portfolio.positions
+        cash = self.state.portfolio.cash
+
+        # Process each corporate action
+        for ticker, row in actions_df.iterrows():
+            action_type = row['action_type']
+            value = row['value']
+
+            # Skip if we don't hold this ticker
+            if ticker not in positions or positions[ticker] == 0:
+                continue
+
+            shares_held = positions[ticker]
+
+            if action_type == 'split':
+                # Apply split: multiply shares by split ratio
+                new_shares = shares_held * value
+                positions[ticker] = new_shares
+                print(f"  Corporate Action: {ticker} {value:.2f}-for-1 split "
+                      f"({shares_held:.2f} → {new_shares:.2f} shares)")
+
+            elif action_type == 'dividend':
+                # Apply dividend: add cash based on shares held
+                dividend_received = shares_held * value
+                cash += dividend_received
+                print(f"  Corporate Action: {ticker} ${value:.4f} dividend "
+                      f"(${dividend_received:.2f} received on {shares_held:.2f} shares)")
+
+        # Update portfolio state
+        self.state.portfolio.cash = cash
 
     def _create_results(self) -> BacktestResults:
         """Create results object from state."""

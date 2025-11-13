@@ -6,7 +6,7 @@ the entire backtest simulation.
 """
 
 import pandas as pd
-from typing import Dict, Optional, Literal
+from typing import Dict, Optional, Literal, Tuple
 from tqdm import tqdm
 
 from .config import BacktestConfig, Portfolio, BacktestState
@@ -239,10 +239,26 @@ class Backtester:
             return  # Skip if no price data
 
         # Apply corporate actions BEFORE trading (splits and dividends)
+        # Create adjusted portfolio WITHOUT modifying state
+        current_positions = self.state.portfolio.positions.copy()
+        current_cash = self.state.portfolio.cash
+
         if 'corporate_actions' in day_data:
-            self._apply_corporate_actions(date, day_data['corporate_actions'])
+            current_positions, current_cash = self._apply_corporate_actions(
+                date, day_data['corporate_actions'], current_positions, current_cash
+            )
 
         prices = day_data['prices']
+
+        # Create temporary portfolio with adjusted positions/cash for use case processing
+        from .config import Portfolio
+        current_portfolio = Portfolio(
+            date=date,
+            positions=current_positions,
+            cash=current_cash,
+            prices=prices
+        )
+
         adv = day_data.get('adv', {})
         betas = day_data.get('betas', {})
         sector_mapping = day_data.get('sector_mapping', {})
@@ -255,18 +271,19 @@ class Backtester:
         if use_case == 3:
             self._simulate_day_use_case_3(
                 date, inputs, prices, adv, betas, sector_mapping,
-                factor_loadings, factor_returns, day_data
+                factor_loadings, factor_returns, day_data,
+                current_portfolio
             )
             return
 
         # Determine target positions for use cases 1 and 2
         if use_case == 1:
             target_positions = self._process_use_case_1(
-                date, inputs, prices
+                date, inputs, prices, current_portfolio
             )
         elif use_case == 2:
             target_positions = self._process_use_case_2(
-                date, inputs, prices
+                date, inputs, prices, current_portfolio
             )
         else:
             raise ValueError(f"Invalid use case: {use_case}")
@@ -282,14 +299,14 @@ class Backtester:
                 target_positions, prices, sector_mapping
             )
 
-        # Calculate trades
+        # Calculate trades based on current (post-corporate-action) positions
         from .utils import calculate_trades
-        trades = calculate_trades(self.state.portfolio.positions, target_positions)
+        trades = calculate_trades(current_portfolio.positions, target_positions)
 
         # Apply ADV constraints
         constrained_trades, _ = self.adv_calculator.apply_constraints(trades, adv)
 
-        # Calculate overnight PnL (holding returns)
+        # Calculate overnight PnL (holding returns from previous day's positions)
         overnight_pnl = 0.0
         if self.prev_prices is not None:
             for ticker, shares in self.state.portfolio.positions.items():
@@ -297,10 +314,10 @@ class Backtester:
                 curr_px = prices.get(ticker, 0.0)
                 overnight_pnl += shares * (curr_px - prev_px)
 
-        # Execute trades
+        # Execute trades using current (post-corporate-action) portfolio
         trade_prices = day_data.get('trade_prices')
         new_portfolio, total_cost, trade_records = self.executor.execute_trades(
-            self.state.portfolio,
+            current_portfolio,
             constrained_trades,
             prices,
             trade_prices,
@@ -368,14 +385,15 @@ class Backtester:
         self,
         date: pd.Timestamp,
         inputs: Dict,
-        prices: Dict[str, float]
+        prices: Dict[str, float],
+        current_portfolio: 'Portfolio'
     ) -> Dict[str, float]:
         """Process use case 1: target positions."""
         input_type = inputs.get('type', 'shares')  # 'shares', 'notional', or 'weights'
         targets_by_date = inputs.get('targets', {})
 
         if date not in targets_by_date:
-            return self.state.portfolio.positions.copy()
+            return current_portfolio.positions.copy()
 
         target_data = targets_by_date[date]
 
@@ -388,9 +406,8 @@ class Backtester:
                 target_data, prices
             )
         elif input_type == 'weights':
-            portfolio_value = self.state.portfolio.get_market_value()
             shares, _, _ = self.target_processor.process_target_weights(
-                target_data, prices, portfolio_value
+                target_data, prices, current_portfolio.portfolio_value
             )
         else:
             raise ValueError(f"Invalid input type: {input_type}")
@@ -401,19 +418,19 @@ class Backtester:
         self,
         date: pd.Timestamp,
         inputs: Dict,
-        prices: Dict[str, float]
+        prices: Dict[str, float],
+        current_portfolio: 'Portfolio'
     ) -> Dict[str, float]:
         """Process use case 2: signals."""
         signals_by_date = inputs.get('signals', {})
 
         if date not in signals_by_date:
-            return self.state.portfolio.positions.copy()
+            return current_portfolio.positions.copy()
 
         signals = signals_by_date[date]
-        portfolio_value = self.state.portfolio.get_market_value()
 
         shares, _, _ = self.signal_processor.process_signals(
-            signals, prices, portfolio_value
+            signals, prices, current_portfolio.portfolio_value
         )
 
         return shares
@@ -424,19 +441,28 @@ class Backtester:
         inputs: Dict,
         prices: Dict[str, float],
         adv: Dict[str, float],
-        factor_loadings: Optional[pd.DataFrame]
-    ) -> Dict[str, float]:
-        """Process use case 3: external trades with optimization."""
+        factor_loadings: Optional[pd.DataFrame],
+        current_portfolio: 'Portfolio'
+    ) -> Dict:
+        """
+        Process use case 3: external trades with optimization.
+
+        Returns:
+        --------
+        Dict with keys:
+            'new_positions': Positions after external trades
+            'target_positions': Optimized target positions (if optimization enabled)
+        """
         external_trades_by_date = inputs.get('external_trades', {})
 
-        # Apply external trades
+        # Apply external trades to current positions
         if date in external_trades_by_date:
             external_trades = external_trades_by_date[date]
             new_positions = self.external_processor.apply_external_trades(
-                self.state.portfolio.positions, external_trades
+                current_portfolio.positions, external_trades
             )
         else:
-            new_positions = self.state.portfolio.positions.copy()
+            new_positions = current_portfolio.positions.copy()
 
         # Check if optimization is needed (if constraints provided)
         needs_optimization = (
@@ -445,7 +471,10 @@ class Backtester:
         )
 
         if not needs_optimization or factor_loadings is None:
-            return new_positions
+            return {
+                'new_positions': new_positions,
+                'target_positions': new_positions
+            }
 
         # Run optimization to satisfy risk constraints
         try:
@@ -465,14 +494,19 @@ class Backtester:
                 max_adv_participation=self.config.max_adv_participation
             )
 
-            # Apply optimal trades
+            # Calculate target positions
+            target_positions = new_positions.copy()
             for ticker, trade_qty in optimal_trades.items():
-                new_positions[ticker] = new_positions.get(ticker, 0.0) + trade_qty
+                target_positions[ticker] = target_positions.get(ticker, 0.0) + trade_qty
 
         except Exception as e:
             print(f"Warning: Optimization failed on {date}: {e}")
+            target_positions = new_positions
 
-        return new_positions
+        return {
+            'new_positions': new_positions,
+            'target_positions': target_positions
+        }
 
     def _simulate_day_use_case_3(
         self,
@@ -484,7 +518,8 @@ class Backtester:
         sector_mapping: Dict[str, str],
         factor_loadings: Optional[pd.DataFrame],
         factor_returns: Dict[str, float],
-        day_data: Dict
+        day_data: Dict,
+        current_portfolio: 'Portfolio'
     ):
         """
         Simulate day for use case 3 with external trades and PnL breakdown.
@@ -501,10 +536,10 @@ class Backtester:
 
         # Check if external_trades is a callable (signal generator)
         if callable(external_trades_by_date):
-            # Create context for the callable
+            # Create context for the callable with current (post-corporate-action) portfolio
             context = {
                 'date': date,
-                'portfolio': self.state.portfolio,
+                'portfolio': current_portfolio,
                 'prices': prices,
                 'adv': adv,
                 'betas': betas,
@@ -530,12 +565,12 @@ class Backtester:
         # Apply external trades to get intermediate positions
         if external_trades:
             positions_after_external, external_trade_records = self.external_processor.apply_external_trades(
-                self.state.portfolio.positions, external_trades
+                current_portfolio.positions, external_trades
             )
             # Record external trades with tags for attribution
             self.state.add_external_trades_with_tags(date, external_trade_records)
         else:
-            positions_after_external = self.state.portfolio.positions.copy()
+            positions_after_external = current_portfolio.positions.copy()
             external_trade_records = []
 
         # Check if optimization is needed
@@ -664,9 +699,15 @@ class Backtester:
         # Update previous prices for next day
         self.prev_prices = prices
 
-    def _apply_corporate_actions(self, date: pd.Timestamp, actions_df: pd.DataFrame):
+    def _apply_corporate_actions(
+        self,
+        date: pd.Timestamp,
+        actions_df: pd.DataFrame,
+        positions: Dict[str, float],
+        cash: float
+    ) -> Tuple[Dict[str, float], float]:
         """
-        Apply corporate actions (splits and dividends) at the start of the trading day.
+        Apply corporate actions (splits and dividends) to positions and cash.
 
         Corporate actions are applied BEFORE any trading:
         - Splits: Adjust share positions by split ratio
@@ -678,13 +719,22 @@ class Backtester:
             Current trading date (ex-date for corporate actions)
         actions_df : pd.DataFrame
             DataFrame with columns [action_type, value] and ticker as index
+        positions : Dict[str, float]
+            Current positions (will not be modified)
+        cash : float
+            Current cash balance
+
+        Returns:
+        --------
+        Tuple[Dict[str, float], float]
+            (adjusted_positions, adjusted_cash)
         """
         if actions_df.empty:
-            return
+            return positions.copy(), cash
 
-        # Get current portfolio state
-        positions = self.state.portfolio.positions
-        cash = self.state.portfolio.cash
+        # Work on copies to avoid modifying state
+        adjusted_positions = positions.copy()
+        adjusted_cash = cash
 
         # Process each corporate action
         for ticker, row in actions_df.iterrows():
@@ -692,27 +742,26 @@ class Backtester:
             value = row['value']
 
             # Skip if we don't hold this ticker
-            if ticker not in positions or positions[ticker] == 0:
+            if ticker not in adjusted_positions or adjusted_positions[ticker] == 0:
                 continue
 
-            shares_held = positions[ticker]
+            shares_held = adjusted_positions[ticker]
 
             if action_type == 'split':
                 # Apply split: multiply shares by split ratio
                 new_shares = shares_held * value
-                positions[ticker] = new_shares
+                adjusted_positions[ticker] = new_shares
                 print(f"  Corporate Action: {ticker} {value:.2f}-for-1 split "
                       f"({shares_held:.2f} → {new_shares:.2f} shares)")
 
             elif action_type == 'dividend':
                 # Apply dividend: add cash based on shares held
                 dividend_received = shares_held * value
-                cash += dividend_received
+                adjusted_cash += dividend_received
                 print(f"  Corporate Action: {ticker} ${value:.4f} dividend "
                       f"(${dividend_received:.2f} received on {shares_held:.2f} shares)")
 
-        # Update portfolio state
-        self.state.portfolio.cash = cash
+        return adjusted_positions, adjusted_cash
 
     def _create_results(self) -> BacktestResults:
         """Create results object from state."""

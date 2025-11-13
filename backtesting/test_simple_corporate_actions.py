@@ -6,6 +6,10 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 import sys
+import os
+
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # Test the simplified approach
 def test_dataframe_loading():

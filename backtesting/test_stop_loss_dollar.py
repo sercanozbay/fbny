@@ -64,7 +64,7 @@ def test_stop_loss_dollar():
     data_manager.load_prices()
     data_manager.load_adv()
 
-    # Create config with dollar-based stop loss
+    # Create config with dollar-based stop loss (no recovery)
     # $5,000 loss -> 75% gross
     # $10,000 loss -> 50% gross
     # $15,000 loss -> 25% gross
@@ -73,14 +73,14 @@ def test_stop_loss_dollar():
         tc_coefficient=0.001,
         tc_power=1.5,
         stop_loss_levels=[
-            (5000, 0.75, 'dollar'),   # $5k loss -> 75% gross
-            (10000, 0.50, 'dollar'),  # $10k loss -> 50% gross
-            (15000, 0.25, 'dollar'),  # $15k loss -> 25% gross
+            (5000, 0.75),   # $5k loss -> 75% gross
+            (10000, 0.50),  # $10k loss -> 50% gross
+            (15000, 0.25),  # $15k loss -> 25% gross
         ]
     )
 
     print(f"\nStop loss configuration (dollar-based):")
-    for threshold, gross, _ in config.stop_loss_levels:
+    for threshold, gross in config.stop_loss_levels:
         print(f"  ${threshold:,.0f} loss -> {gross:.0%} gross")
 
     # Create backtester

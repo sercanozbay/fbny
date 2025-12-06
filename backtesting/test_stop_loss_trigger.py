@@ -60,21 +60,21 @@ def test_stop_loss_triggers():
     data_manager.load_prices()
     data_manager.load_adv()
 
-    # Create config with aggressive stop loss
+    # Create config with aggressive dollar-based stop loss (based on $100k capital)
     config = BacktestConfig(
         initial_cash=100000.0,
         tc_coefficient=0.001,
         tc_power=1.5,
         stop_loss_levels=[
-            (0.05, 0.75),  # 5% DD -> 75% gross
-            (0.10, 0.50),  # 10% DD -> 50% gross
-            (0.15, 0.25),  # 15% DD -> 25% gross
+            (5000, 0.75),   # $5k loss -> 75% gross
+            (10000, 0.50),  # $10k loss -> 50% gross
+            (15000, 0.25),  # $15k loss -> 25% gross
         ]
     )
 
     print(f"\nStop loss configuration:")
     for dd, gross in config.stop_loss_levels:
-        print(f"  {dd:.0%} DD -> {gross:.0%} gross")
+        print(f"  ${dd:,.0f} loss -> {gross:.0%} gross")
 
     # Create backtester
     backtester = Backtester(config, data_manager)

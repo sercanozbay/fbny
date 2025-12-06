@@ -1,5 +1,5 @@
 """
-Demonstration test for stop loss recovery functionality.
+Demonstration test for dollar-based stop loss recovery functionality.
 
 This test creates a scenario with clear drawdown and recovery phases
 to demonstrate the stop loss moving through multiple levels.
@@ -17,9 +17,9 @@ from backtesting import Backtester, BacktestConfig, DataManager
 
 
 def test_stop_loss_recovery_demo():
-    """Demonstrate stop loss recovery through multiple levels."""
+    """Demonstrate dollar-based stop loss recovery through multiple levels."""
     print("\n" + "="*70)
-    print("DEMONSTRATION: Stop Loss Recovery Through Multiple Levels")
+    print("DEMONSTRATION: Dollar-Based Stop Loss Recovery")
     print("="*70)
 
     # Create test data
@@ -27,65 +27,66 @@ def test_stop_loss_recovery_demo():
     test_dir.mkdir(exist_ok=True)
 
     # Create dates - longer period to show all transitions
-    dates = pd.date_range('2023-01-01', periods=120, freq='B')
+    dates = pd.date_range('2023-01-01', periods=100, freq='B')
     tickers = ['AAPL']
 
     # Create dramatic price scenario to trigger all levels
-    # Phase 1 (Days 0-10): Stable at $100
-    # Phase 2 (Days 10-30): Drop to $90 (10% DD - triggers Level 1: 75% gross)
-    # Phase 3 (Days 30-35): Drop to $85 (15% DD - triggers Level 2: 50% gross)
-    # Phase 4 (Days 35-40): Drop to $80 (20% DD - triggers Level 3: 25% gross)
-    # Phase 5 (Days 40-60): Recover to $90 (50% recovery from $80 - back to Level 2: 50% gross)
-    # Phase 6 (Days 60-80): Recover to $95 (50% recovery from $90 - back to Level 1: 75% gross)
-    # Phase 7 (Days 80-100): Recover to $99 (50% recovery from $95 - back to 100% gross)
-    # Phase 8 (Days 100-120): New peak at $105 (fully cleared stop loss)
+    # Initial portfolio value: $100,000 (1000 shares @ $100)
+    # Phase 1 (Days 0-10):  Stable at $100 (peak = $100k)
+    # Phase 2 (Days 10-25): Drop to $95 ($5k loss - triggers Level 1: 75% gross)
+    # Phase 3 (Days 25-35): Drop to $90 ($10k loss - triggers Level 2: 50% gross)
+    # Phase 4 (Days 35-45): Drop to $85 ($15k loss - triggers Level 3: 25% gross)
+    # Phase 5 (Days 45-60): Recover to $92.5 ($7.5k recovery - back to Level 2: 50%)
+    # Phase 6 (Days 60-75): Recover to $97.5 ($5k recovery - back to Level 1: 75%)
+    # Phase 7 (Days 75-90): Recover to $100 ($2.5k recovery - cleared: 100%)
+    # Phase 8 (Days 90-100): New peak at $102 (fully cleared)
 
     prices = []
     for i in range(len(dates)):
         if i < 10:
             price = 100.0  # Phase 1: Peak
-        elif i < 30:
-            # Phase 2: Drop to $90
-            progress = (i - 10) / 20
-            price = 100.0 - progress * 10.0
+        elif i < 25:
+            # Phase 2: Drop to $95
+            progress = (i - 10) / 15
+            price = 100.0 - progress * 5.0
         elif i < 35:
-            # Phase 3: Drop to $85
-            progress = (i - 30) / 5
+            # Phase 3: Drop to $90
+            progress = (i - 25) / 10
+            price = 95.0 - progress * 5.0
+        elif i < 45:
+            # Phase 4: Drop to $85
+            progress = (i - 35) / 10
             price = 90.0 - progress * 5.0
-        elif i < 40:
-            # Phase 4: Drop to $80
-            progress = (i - 35) / 5
-            price = 85.0 - progress * 5.0
         elif i < 60:
-            # Phase 5: Recover to $90 (50% of $80-$100 = $10)
-            progress = (i - 40) / 20
-            price = 80.0 + progress * 10.0
-        elif i < 80:
-            # Phase 6: Recover to $95 (50% of $90-$100 = $5)
-            progress = (i - 60) / 20
-            price = 90.0 + progress * 5.0
-        elif i < 100:
-            # Phase 7: Recover to $99 (50% of $95-$100 = $2.5, but round up)
-            progress = (i - 80) / 20
-            price = 95.0 + progress * 4.0
+            # Phase 5: Recover to $92.5 ($7.5k recovery from $85k)
+            progress = (i - 45) / 15
+            price = 85.0 + progress * 7.5
+        elif i < 75:
+            # Phase 6: Recover to $97.5 ($5k recovery from $92.5k)
+            progress = (i - 60) / 15
+            price = 92.5 + progress * 5.0
+        elif i < 90:
+            # Phase 7: Recover to $100 ($2.5k recovery from $97.5k)
+            progress = (i - 75) / 15
+            price = 97.5 + progress * 2.5
         else:
             # Phase 8: New peak
-            progress = (i - 100) / 20
-            price = 99.0 + progress * 6.0
+            progress = (i - 90) / 10
+            price = 100.0 + progress * 2.0
         prices.append(price)
 
     prices_df = pd.DataFrame({'AAPL': prices}, index=dates)
     prices_df.to_csv(test_dir / 'prices.csv')
 
-    print(f"\nPrice Scenario (8 phases):")
-    print(f"  Phase 1 (Days 0-10):   $100 (peak)")
-    print(f"  Phase 2 (Days 10-30):  $100 → $90 (10% DD → Level 1: 75% gross)")
-    print(f"  Phase 3 (Days 30-35):  $90 → $85 (15% DD → Level 2: 50% gross)")
-    print(f"  Phase 4 (Days 35-40):  $85 → $80 (20% DD → Level 3: 25% gross)")
-    print(f"  Phase 5 (Days 40-60):  $80 → $90 (50% recovery → back to Level 2: 50%)")
-    print(f"  Phase 6 (Days 60-80):  $90 → $95 (50% recovery → back to Level 1: 75%)")
-    print(f"  Phase 7 (Days 80-100): $95 → $99 (50% recovery → back to 100%)")
-    print(f"  Phase 8 (Days 100-120): $99 → $105 (new peak → stop loss cleared)")
+    print(f"\nPrice Scenario (8 phases, 1000 shares @ $100 = $100k):")
+    print(f"  Phase 1 (Days 0-10):   $100/share = $100k (peak)")
+    print(f"  Phase 2 (Days 10-25):  $95/share = $95k ($5k loss → Level 1: 75%)")
+    print(f"  Phase 3 (Days 25-35):  $90/share = $90k ($10k loss → Level 2: 50%)")
+    print(f"  Phase 4 (Days 35-45):  $85/share = $85k ($15k loss → Level 3: 25%)")
+    print(f"  Phase 5 (Days 45-60):  $92.5/share = $92.5k ($7.5k recovery → Level 2)")
+    print(f"  Phase 6 (Days 60-75):  $97.5/share = $97.5k ($5k recovery → Level 1)")
+    print(f"  Phase 7 (Days 75-90):  $100/share = $100k ($2.5k recovery → Cleared)")
+    print(f"  Phase 8 (Days 90-100): $102/share = $102k (new peak)")
 
     # Create ADV
     adv_df = pd.DataFrame({'AAPL': [1000000] * len(dates)}, index=dates)
@@ -96,22 +97,22 @@ def test_stop_loss_recovery_demo():
     data_manager.load_prices()
     data_manager.load_adv()
 
-    # Create config with stop loss and recovery levels
+    # Create config with stop loss and recovery levels (dollar-based)
     config = BacktestConfig(
         initial_cash=100000.0,
         tc_coefficient=0.001,
         tc_power=1.5,
         stop_loss_levels=[
-            (0.10, 0.75, 0.50),  # 10% DD → 75% gross, recover at 50%
-            (0.15, 0.50, 0.50),  # 15% DD → 50% gross, recover at 50%
-            (0.20, 0.25, 0.50),  # 20% DD → 25% gross, recover at 50%
+            (5000, 0.75, 2500),   # $5k loss → 75%, recover at $2.5k from bottom
+            (10000, 0.50, 5000),  # $10k loss → 50%, recover at $5k from bottom
+            (15000, 0.25, 7500),  # $15k loss → 25%, recover at $7.5k from bottom
         ]
     )
 
     print(f"\nStop Loss Configuration:")
-    print(f"  Level 1: 10% DD → 75% gross (recover at 50% from bottom)")
-    print(f"  Level 2: 15% DD → 50% gross (recover at 50% from bottom)")
-    print(f"  Level 3: 20% DD → 25% gross (recover at 50% from bottom)")
+    print(f"  Level 1: $5k loss → 75% gross (recover at $2.5k from bottom)")
+    print(f"  Level 2: $10k loss → 50% gross (recover at $5k from bottom)")
+    print(f"  Level 3: $15k loss → 25% gross (recover at $7.5k from bottom)")
 
     # Create backtester
     backtester = Backtester(config, data_manager)
@@ -146,14 +147,14 @@ def test_stop_loss_recovery_demo():
     final_value = results.portfolio_values[-1]
     peak_value = max(results.portfolio_values)
     total_return = (final_value / config.initial_cash - 1)
-    max_dd_pct = (peak_value - min(results.portfolio_values)) / peak_value
+    max_dd_dollar = peak_value - min(results.portfolio_values)
 
     print(f"Initial capital: ${config.initial_cash:,.2f}")
     print(f"Peak portfolio value: ${peak_value:,.2f}")
     print(f"Lowest portfolio value: ${min(results.portfolio_values):,.2f}")
     print(f"Final portfolio value: ${final_value:,.2f}")
     print(f"Total return: {total_return:.2%}")
-    print(f"Max drawdown: {max_dd_pct:.2%}")
+    print(f"Max dollar drawdown: ${max_dd_dollar:,.2f}")
 
     # Calculate what would have happened without stop loss
     initial_shares = 1000.0
@@ -165,7 +166,6 @@ def test_stop_loss_recovery_demo():
     print(f"\nComparison:")
     print(f"  With stop loss:    {total_return:>8.2%} (${final_value:,.2f})")
     print(f"  Without stop loss: {no_sl_return:>8.2%} (${no_sl_value:,.2f})")
-    print(f"  Benefit:           {(total_return - no_sl_return):>8.2%} (${final_value - no_sl_value:,.2f})")
 
     # Verify we have results
     assert len(results.dates) > 0, "No results generated"
@@ -173,14 +173,14 @@ def test_stop_loss_recovery_demo():
     assert np.isfinite(total_return), f"Return is not finite: {total_return}"
 
     print(f"\n{'='*70}")
-    print("✓ Stop loss recovery demonstration complete!")
+    print("✓ Dollar-based stop loss recovery demonstration complete!")
     print(f"{'='*70}\n")
 
     print("\nKey Observations:")
-    print("  1. Stop loss triggers at deeper levels as drawdown increases")
+    print("  1. Stop loss triggers at deeper levels as dollar losses increase")
     print("  2. Recovery thresholds move us back through levels as portfolio recovers")
     print("  3. Final recovery to new peak fully clears the stop loss")
-    print("  4. Stop loss reduces losses during drawdown phases")
+    print("  4. Stop loss provides protection during severe drawdowns")
 
     # Cleanup
     import shutil

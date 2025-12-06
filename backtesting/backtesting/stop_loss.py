@@ -2,10 +2,10 @@
 Stop Loss Manager
 
 Manages stop loss functionality by reducing gross exposure when drawdown
-hits specified levels.
+hits specified dollar levels.
 """
 
-from typing import Dict, List, Tuple, Optional, Union, Literal
+from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
 
 
@@ -14,46 +14,32 @@ class StopLossLevel:
     """
     A single stop loss level with optional recovery threshold.
 
-    Supports both percentage and dollar drawdown/recovery thresholds.
+    All thresholds are dollar-based for simplicity.
 
     Attributes:
     -----------
     drawdown_threshold : float
-        Drawdown level that triggers reduction to this gross level.
-        - If threshold_type='percent': value between 0-1 (e.g., 0.10 for 10% drawdown)
-        - If threshold_type='dollar': absolute dollar amount (e.g., 5000 for $5,000 loss)
+        Dollar loss that triggers reduction to this gross level.
+        Example: 5000 means at $5,000 loss from peak
 
     gross_reduction : float
         Target gross exposure as a percentage (e.g., 0.5 means reduce to 50% of normal gross)
 
     recovery_threshold : Optional[float]
-        Recovery level from drawdown bottom that triggers moving back to previous gross level.
-        - If threshold_type='percent': recovery as percent from bottom (e.g., 0.50 = 50% recovery)
-        - If threshold_type='dollar': dollar recovery from bottom (e.g., 2500 = $2,500 recovery)
+        Dollar recovery from drawdown bottom that triggers moving back to previous gross level.
+        Example: 2500 means at $2,500 recovery from trough
         If None, no automatic recovery for this level.
-
-    threshold_type : Literal['percent', 'dollar']
-        Type of drawdown/recovery thresholds. Default: 'percent'
     """
     drawdown_threshold: float
     gross_reduction: float
     recovery_threshold: Optional[float] = None
-    threshold_type: Literal['percent', 'dollar'] = 'percent'
 
     def __post_init__(self):
-        if self.threshold_type == 'percent':
-            if self.drawdown_threshold < 0 or self.drawdown_threshold > 1:
-                raise ValueError(f"Percent drawdown threshold must be between 0 and 1, got {self.drawdown_threshold}")
-            if self.recovery_threshold is not None:
-                if self.recovery_threshold < 0 or self.recovery_threshold > 1:
-                    raise ValueError(f"Percent recovery threshold must be between 0 and 1, got {self.recovery_threshold}")
-        elif self.threshold_type == 'dollar':
-            if self.drawdown_threshold < 0:
-                raise ValueError(f"Dollar drawdown threshold must be non-negative, got {self.drawdown_threshold}")
-            if self.recovery_threshold is not None and self.recovery_threshold < 0:
-                raise ValueError(f"Dollar recovery threshold must be non-negative, got {self.recovery_threshold}")
-        else:
-            raise ValueError(f"threshold_type must be 'percent' or 'dollar', got {self.threshold_type}")
+        if self.drawdown_threshold < 0:
+            raise ValueError(f"Dollar drawdown threshold must be non-negative, got {self.drawdown_threshold}")
+
+        if self.recovery_threshold is not None and self.recovery_threshold < 0:
+            raise ValueError(f"Dollar recovery threshold must be non-negative, got {self.recovery_threshold}")
 
         if self.gross_reduction < 0 or self.gross_reduction > 1:
             raise ValueError(f"Gross reduction must be between 0 and 1, got {self.gross_reduction}")
@@ -61,17 +47,17 @@ class StopLossLevel:
 
 class StopLossManager:
     """
-    Manages stop loss functionality by tracking drawdown and reducing gross exposure.
+    Manages stop loss functionality by tracking dollar drawdown and reducing gross exposure.
 
-    The manager tracks the peak portfolio value and current drawdown. When drawdown
-    exceeds specified thresholds, it reduces the target gross exposure.
+    The manager tracks the peak portfolio value and current dollar drawdown. When drawdown
+    exceeds specified dollar thresholds, it reduces the target gross exposure.
 
     Example:
     --------
     >>> levels = [
-    ...     StopLossLevel(drawdown_threshold=0.05, gross_reduction=0.75),  # 5% DD -> 75% gross
-    ...     StopLossLevel(drawdown_threshold=0.10, gross_reduction=0.50),  # 10% DD -> 50% gross
-    ...     StopLossLevel(drawdown_threshold=0.15, gross_reduction=0.25),  # 15% DD -> 25% gross
+    ...     StopLossLevel(drawdown_threshold=5000, gross_reduction=0.75),   # $5k loss -> 75% gross
+    ...     StopLossLevel(drawdown_threshold=10000, gross_reduction=0.50),  # $10k loss -> 50% gross
+    ...     StopLossLevel(drawdown_threshold=15000, gross_reduction=0.25),  # $15k loss -> 25% gross
     ... ]
     >>> manager = StopLossManager(levels)
     """
@@ -84,21 +70,10 @@ class StopLossManager:
         -----------
         levels : List[StopLossLevel]
             List of stop loss levels. Should be sorted by increasing drawdown threshold.
-            All levels must use the same threshold_type (either all 'percent' or all 'dollar').
         """
         if not levels:
             raise ValueError("Must provide at least one stop loss level")
 
-        # Validate all levels use same threshold type
-        threshold_types = set(level.threshold_type for level in levels)
-        if len(threshold_types) > 1:
-            raise ValueError(
-                f"All stop loss levels must use the same threshold_type. "
-                f"Found mixed types: {threshold_types}. "
-                f"Use either all 'percent' or all 'dollar'."
-            )
-
-        self.threshold_type = levels[0].threshold_type
         self.levels = levels
 
         # Validate that gross reductions are decreasing
@@ -113,9 +88,7 @@ class StopLossManager:
         # Track peak portfolio value and drawdown
         self.peak_value: Optional[float] = None
         self.trough_value: Optional[float] = None  # Lowest value during current drawdown
-        self.current_drawdown_pct: float = 0.0
         self.current_drawdown_dollar: float = 0.0
-        self.current_recovery_pct: float = 0.0  # Recovery from trough
         self.current_recovery_dollar: float = 0.0  # Dollar recovery from trough
         self.current_gross_multiplier: float = 1.0
         self.triggered_level: Optional[int] = None  # Index of triggered level
@@ -155,18 +128,9 @@ class StopLossManager:
 
         # Calculate current drawdown (from peak)
         self.current_drawdown_dollar = self.peak_value - portfolio_value
-        if self.peak_value > 0:
-            self.current_drawdown_pct = self.current_drawdown_dollar / self.peak_value
-        else:
-            self.current_drawdown_pct = 0.0
 
         # Calculate current recovery (from trough)
         self.current_recovery_dollar = portfolio_value - self.trough_value
-        drawdown_amount = self.peak_value - self.trough_value
-        if drawdown_amount > 0:
-            self.current_recovery_pct = self.current_recovery_dollar / drawdown_amount
-        else:
-            self.current_recovery_pct = 0.0
 
         # Determine which level should be active
         new_triggered_level = None
@@ -174,13 +138,7 @@ class StopLossManager:
 
         # First, check if we should trigger a deeper level (going down)
         for i, level in enumerate(self.levels):
-            triggered = False
-            if self.threshold_type == 'percent':
-                triggered = self.current_drawdown_pct >= level.drawdown_threshold
-            else:  # dollar
-                triggered = self.current_drawdown_dollar >= level.drawdown_threshold
-
-            if triggered:
+            if self.current_drawdown_dollar >= level.drawdown_threshold:
                 new_triggered_level = i
                 new_gross_multiplier = level.gross_reduction
 
@@ -190,13 +148,7 @@ class StopLossManager:
             # Check if we can move to a less restrictive level
             current_level = self.levels[self.triggered_level]
             if current_level.recovery_threshold is not None:
-                recovered = False
-                if self.threshold_type == 'percent':
-                    recovered = self.current_recovery_pct >= current_level.recovery_threshold
-                else:  # dollar
-                    recovered = self.current_recovery_dollar >= current_level.recovery_threshold
-
-                if recovered:
+                if self.current_recovery_dollar >= current_level.recovery_threshold:
                     # Move to previous (less restrictive) level, or clear if at first level
                     if self.triggered_level > 0:
                         new_triggered_level = self.triggered_level - 1
@@ -219,11 +171,8 @@ class StopLossManager:
                 print(f"Peak value: ${self.peak_value:,.2f}")
                 print(f"Trough value: ${self.trough_value:,.2f}")
                 print(f"Current value: ${portfolio_value:,.2f}")
-                print(f"Drawdown: {self.current_drawdown_pct:.2%} (${self.current_drawdown_dollar:,.2f})")
-                if self.threshold_type == 'percent':
-                    print(f"Threshold: {triggered_level_obj.drawdown_threshold:.2%}")
-                else:
-                    print(f"Threshold: ${triggered_level_obj.drawdown_threshold:,.2f}")
+                print(f"Dollar drawdown: ${self.current_drawdown_dollar:,.2f}")
+                print(f"Threshold: ${triggered_level_obj.drawdown_threshold:,.2f}")
                 print(f"Reducing gross exposure to {new_gross_multiplier:.1%}")
                 print(f"{'='*60}\n")
             elif new_triggered_level is None or (self.triggered_level is not None and new_triggered_level < self.triggered_level):
@@ -237,7 +186,7 @@ class StopLossManager:
                 print(f"Peak value: ${self.peak_value:,.2f}")
                 print(f"Trough value: ${self.trough_value:,.2f}")
                 print(f"Current value: ${portfolio_value:,.2f}")
-                print(f"Recovery: {self.current_recovery_pct:.2%} (${self.current_recovery_dollar:,.2f})")
+                print(f"Dollar recovery: ${self.current_recovery_dollar:,.2f}")
                 if new_triggered_level is None:
                     print(f"Restoring full gross exposure (100%)")
                 else:
@@ -295,9 +244,7 @@ class StopLossManager:
         return {
             'peak_value': self.peak_value,
             'trough_value': self.trough_value,
-            'current_drawdown_pct': self.current_drawdown_pct,
             'current_drawdown_dollar': self.current_drawdown_dollar,
-            'current_recovery_pct': self.current_recovery_pct,
             'current_recovery_dollar': self.current_recovery_dollar,
             'gross_multiplier': self.current_gross_multiplier,
             'triggered_level': self.triggered_level,
@@ -308,9 +255,7 @@ class StopLossManager:
         """Reset the stop loss manager (e.g., for a new backtest)."""
         self.peak_value = None
         self.trough_value = None
-        self.current_drawdown_pct = 0.0
         self.current_drawdown_dollar = 0.0
-        self.current_recovery_pct = 0.0
         self.current_recovery_dollar = 0.0
         self.current_gross_multiplier = 1.0
         self.triggered_level = None

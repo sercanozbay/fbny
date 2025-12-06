@@ -95,7 +95,7 @@ class Backtester:
             tolerance=config.optimizer_tolerance
         )
 
-        # Stop loss manager (for use cases 1 and 2)
+        # Stop loss manager (for use cases 1 and 2) - all dollar-based
         self.stop_loss_manager: Optional[StopLossManager] = None
         if config.stop_loss_levels is not None:
             levels = []
@@ -105,36 +105,14 @@ class Backtester:
                     levels.append(StopLossLevel(
                         drawdown_threshold=dd,
                         gross_reduction=gr,
-                        recovery_threshold=None,
-                        threshold_type='percent'
+                        recovery_threshold=None
                     ))
                 elif len(level_tuple) == 3:
-                    # Check if 3rd element is a string (old format) or recovery threshold (new format)
-                    if isinstance(level_tuple[2], str):
-                        # Old format: (dd, gr, 'dollar')
-                        dd, gr, threshold_type = level_tuple
-                        levels.append(StopLossLevel(
-                            drawdown_threshold=dd,
-                            gross_reduction=gr,
-                            recovery_threshold=None,
-                            threshold_type=threshold_type
-                        ))
-                    else:
-                        # New format: (dd, gr, recovery) - assumes percent
-                        dd, gr, recovery = level_tuple
-                        levels.append(StopLossLevel(
-                            drawdown_threshold=dd,
-                            gross_reduction=gr,
-                            recovery_threshold=recovery,
-                            threshold_type='percent'
-                        ))
-                elif len(level_tuple) == 4:
-                    dd, gr, recovery, threshold_type = level_tuple
+                    dd, gr, recovery = level_tuple
                     levels.append(StopLossLevel(
                         drawdown_threshold=dd,
                         gross_reduction=gr,
-                        recovery_threshold=recovery,
-                        threshold_type=threshold_type
+                        recovery_threshold=recovery
                     ))
             self.stop_loss_manager = StopLossManager(levels)
 

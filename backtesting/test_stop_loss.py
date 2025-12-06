@@ -73,24 +73,25 @@ def test_stop_loss_basic():
     data_manager.load_adv()
 
     # Create config with stop loss levels
-    # 5% DD -> 75% gross
-    # 10% DD -> 50% gross
-    # 15% DD -> 25% gross
+    # Dollar-based stop loss levels (based on $100k initial capital)
+    # $5k loss -> 75% gross
+    # $10k loss -> 50% gross
+    # $15k loss -> 25% gross
     config = BacktestConfig(
         initial_cash=100000.0,
         tc_coefficient=0.001,
         tc_power=1.5,
         stop_loss_levels=[
-            (0.05, 0.75),  # 5% drawdown -> 75% gross
-            (0.10, 0.50),  # 10% drawdown -> 50% gross
-            (0.15, 0.25),  # 15% drawdown -> 25% gross
+            (5000, 0.75),   # $5k loss -> 75% gross
+            (10000, 0.50),  # $10k loss -> 50% gross
+            (15000, 0.25),  # $15k loss -> 25% gross
         ]
     )
 
     print(f"\nStop loss levels configured:")
-    print(f"   5% DD -> 75% gross")
-    print(f"  10% DD -> 50% gross")
-    print(f"  15% DD -> 25% gross")
+    print(f"  $5k loss -> 75% gross")
+    print(f" $10k loss -> 50% gross")
+    print(f" $15k loss -> 25% gross")
 
     # Create backtester
     backtester = Backtester(config, data_manager)
@@ -199,20 +200,20 @@ def test_stop_loss_use_case_2():
     data_manager.load_prices()
     data_manager.load_adv()
 
-    # Create config with stop loss
+    # Create config with dollar-based stop loss (based on $100k capital)
     config = BacktestConfig(
         initial_cash=100000.0,
         tc_coefficient=0.001,
         tc_power=1.5,
         stop_loss_levels=[
-            (0.08, 0.60),  # 8% drawdown -> 60% gross
-            (0.12, 0.30),  # 12% drawdown -> 30% gross
+            (8000, 0.60),   # $8k loss -> 60% gross
+            (12000, 0.30),  # $12k loss -> 30% gross
         ]
     )
 
     print(f"\nStop loss levels:")
-    print(f"   8% DD -> 60% gross")
-    print(f"  12% DD -> 30% gross")
+    print(f"  $8k loss -> 60% gross")
+    print(f" $12k loss -> 30% gross")
 
     # Create backtester
     backtester = Backtester(config, data_manager)

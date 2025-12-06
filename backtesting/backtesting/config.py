@@ -56,28 +56,38 @@ class BacktestConfig:
     initial_positions: Optional[Dict[str, float]] = None  # Initial holdings (ticker: shares)
 
     # Stop loss configuration (use cases 1 and 2 only)
-    stop_loss_levels: Optional[List[Union[Tuple[float, float], Tuple[float, float, str]]]] = None
+    stop_loss_levels: Optional[List[Union[
+        Tuple[float, float],
+        Tuple[float, float, Optional[float]],
+        Tuple[float, float, Optional[float], str]
+    ]]] = None
     # List of stop loss level tuples:
-    #   - 2-tuple: (drawdown_threshold, gross_reduction) - assumes 'percent' type
-    #   - 3-tuple: (drawdown_threshold, gross_reduction, threshold_type)
+    #   - 2-tuple: (drawdown_threshold, gross_reduction) - assumes 'percent' type, no recovery
+    #   - 3-tuple: (drawdown_threshold, gross_reduction, recovery_threshold) - assumes 'percent' type
+    #   - 4-tuple: (drawdown_threshold, gross_reduction, recovery_threshold, threshold_type)
     #
     # threshold_type can be 'percent' or 'dollar'
+    # recovery_threshold is optional (can be None) - when portfolio recovers by this amount from
+    # the drawdown trough, it moves back to the previous (less restrictive) level
+    #
+    # IMPORTANT: All levels must use the same threshold_type (all 'percent' or all 'dollar').
+    # Mixed threshold types are not supported.
     #
     # Examples:
-    #   Percent-based:
+    #   Percent-based with recovery:
+    #     [(0.05, 0.75, 0.50), (0.10, 0.50, 0.50)] means:
+    #       - At 5% drawdown, reduce gross to 75%; recover to 100% when portfolio recovers 50% from bottom
+    #       - At 10% drawdown, reduce gross to 50%; recover to 75% when portfolio recovers 50% from bottom
+    #
+    #   Dollar-based with recovery:
+    #     [(5000, 0.75, 2500, 'dollar'), (10000, 0.50, 5000, 'dollar')] means:
+    #       - At $5k loss, reduce gross to 75%; recover to 100% when portfolio recovers $2,500 from bottom
+    #       - At $10k loss, reduce gross to 50%; recover to 75% when portfolio recovers $5,000 from bottom
+    #
+    #   Without recovery (backward compatible):
     #     [(0.05, 0.75), (0.10, 0.50)] means:
-    #       - At 5% drawdown, reduce gross to 75%
-    #       - At 10% drawdown, reduce gross to 50%
-    #
-    #   Dollar-based:
-    #     [(5000, 0.75, 'dollar'), (10000, 0.50, 'dollar')] means:
-    #       - At $5,000 loss, reduce gross to 75%
-    #       - At $10,000 loss, reduce gross to 50%
-    #
-    #   Mixed:
-    #     [(0.05, 0.75), (10000, 0.50, 'dollar')] means:
-    #       - At 5% drawdown, reduce gross to 75%
-    #       - At $10,000 loss, reduce gross to 50%
+    #       - At 5% drawdown, reduce gross to 75% (no automatic recovery)
+    #       - At 10% drawdown, reduce gross to 50% (no automatic recovery)
 
     def __post_init__(self):
         """Validate configuration."""
@@ -90,27 +100,75 @@ class BacktestConfig:
 
         # Validate stop loss levels if provided
         if self.stop_loss_levels is not None:
+            # First pass: extract all threshold types to ensure consistency
+            threshold_types = set()
+            for level_tuple in self.stop_loss_levels:
+                if len(level_tuple) == 2:
+                    threshold_types.add('percent')
+                elif len(level_tuple) == 3:
+                    # Check if 3rd element is a string (old format) or recovery threshold (new format)
+                    if isinstance(level_tuple[2], str):
+                        threshold_types.add(level_tuple[2])  # Old format: (dd, gross, 'dollar')
+                    else:
+                        threshold_types.add('percent')  # New format: (dd, gross, recovery)
+                elif len(level_tuple) == 4:
+                    threshold_types.add(level_tuple[3])
+                else:
+                    raise ValueError(f"Stop loss level must be 2-tuple, 3-tuple, or 4-tuple, got {len(level_tuple)}-tuple")
+
+            # Ensure all levels use the same threshold type
+            if len(threshold_types) > 1:
+                raise ValueError(
+                    f"All stop loss levels must use the same threshold_type. "
+                    f"Found mixed types: {threshold_types}. "
+                    f"Use either all 'percent' or all 'dollar'."
+                )
+
+            # Second pass: validate each level
             for level_tuple in self.stop_loss_levels:
                 if len(level_tuple) == 2:
                     dd_threshold, gross_reduction = level_tuple
+                    recovery_threshold = None
                     threshold_type = 'percent'
                 elif len(level_tuple) == 3:
-                    dd_threshold, gross_reduction, threshold_type = level_tuple
+                    # Check if 3rd element is a string (old format) or recovery threshold (new format)
+                    if isinstance(level_tuple[2], str):
+                        # Old format: (dd, gross, 'dollar')
+                        dd_threshold, gross_reduction, threshold_type = level_tuple
+                        recovery_threshold = None
+                    else:
+                        # New format: (dd, gross, recovery) - assumes percent
+                        dd_threshold, gross_reduction, recovery_threshold = level_tuple
+                        threshold_type = 'percent'
+                elif len(level_tuple) == 4:
+                    dd_threshold, gross_reduction, recovery_threshold, threshold_type = level_tuple
                 else:
-                    raise ValueError(f"Stop loss level must be 2-tuple or 3-tuple, got {len(level_tuple)}-tuple")
+                    raise ValueError(f"Stop loss level must be 2-tuple, 3-tuple, or 4-tuple, got {len(level_tuple)}-tuple")
 
-                # Validate based on type
+                # Validate threshold type
+                if threshold_type not in ('percent', 'dollar'):
+                    raise ValueError(f"threshold_type must be 'percent' or 'dollar', got {threshold_type}")
+
+                # Validate drawdown threshold based on type
                 if threshold_type == 'percent':
                     if dd_threshold < 0 or dd_threshold > 1:
                         raise ValueError(f"Percent drawdown threshold must be in [0, 1], got {dd_threshold}")
                 elif threshold_type == 'dollar':
                     if dd_threshold < 0:
                         raise ValueError(f"Dollar drawdown threshold must be non-negative, got {dd_threshold}")
-                else:
-                    raise ValueError(f"threshold_type must be 'percent' or 'dollar', got {threshold_type}")
 
+                # Validate gross reduction
                 if gross_reduction < 0 or gross_reduction > 1:
                     raise ValueError(f"Gross reduction must be in [0, 1], got {gross_reduction}")
+
+                # Validate recovery threshold if provided
+                if recovery_threshold is not None:
+                    if threshold_type == 'percent':
+                        if recovery_threshold < 0 or recovery_threshold > 1:
+                            raise ValueError(f"Percent recovery threshold must be in [0, 1], got {recovery_threshold}")
+                    elif threshold_type == 'dollar':
+                        if recovery_threshold < 0:
+                            raise ValueError(f"Dollar recovery threshold must be non-negative, got {recovery_threshold}")
 
 
 @dataclass

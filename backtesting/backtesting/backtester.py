@@ -19,6 +19,7 @@ from .input_processor import TargetPortfolioProcessor, SignalProcessor, External
 from .execution import TradeExecutor
 from .attribution import PerformanceAttributor, AttributionTracker
 from .results import BacktestResults
+from .stop_loss import StopLossManager, StopLossLevel
 
 
 class Backtester:
@@ -93,6 +94,19 @@ class Backtester:
             max_iter=config.optimizer_max_iter,
             tolerance=config.optimizer_tolerance
         )
+
+        # Stop loss manager (for use cases 1 and 2)
+        self.stop_loss_manager: Optional[StopLossManager] = None
+        if config.stop_loss_levels is not None:
+            levels = []
+            for level_tuple in config.stop_loss_levels:
+                if len(level_tuple) == 2:
+                    dd, gr = level_tuple
+                    levels.append(StopLossLevel(drawdown_threshold=dd, gross_reduction=gr, threshold_type='percent'))
+                elif len(level_tuple) == 3:
+                    dd, gr, threshold_type = level_tuple
+                    levels.append(StopLossLevel(drawdown_threshold=dd, gross_reduction=gr, threshold_type=threshold_type))
+            self.stop_loss_manager = StopLossManager(levels)
 
         # State
         self.state: Optional[BacktestState] = None
@@ -298,6 +312,21 @@ class Backtester:
             target_positions, _ = self.sector_hedger.apply_hedge(
                 target_positions, prices, sector_mapping
             )
+
+        # Apply stop loss (if enabled) - update manager and reduce gross if needed
+        if self.stop_loss_manager is not None:
+            # Get current portfolio value
+            current_portfolio_value = self.state.portfolio_values[-1] if self.state.portfolio_values else self.config.initial_cash
+
+            # Update stop loss manager with current value
+            gross_multiplier, level_changed = self.stop_loss_manager.update(current_portfolio_value)
+
+            # Apply gross reduction to target positions if stop loss is active
+            if gross_multiplier < 1.0:
+                target_positions = self.stop_loss_manager.apply_to_positions(
+                    target_positions,
+                    current_portfolio.positions
+                )
 
         # Calculate trades based on current (post-corporate-action) positions
         from .utils import calculate_trades

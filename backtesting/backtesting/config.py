@@ -6,7 +6,7 @@ used throughout the backtesting system.
 """
 
 from dataclasses import dataclass, field
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple, Union
 import numpy as np
 
 
@@ -55,6 +55,30 @@ class BacktestConfig:
     initial_cash: float = 10_000_000.0  # Starting cash
     initial_positions: Optional[Dict[str, float]] = None  # Initial holdings (ticker: shares)
 
+    # Stop loss configuration (use cases 1 and 2 only)
+    stop_loss_levels: Optional[List[Union[Tuple[float, float], Tuple[float, float, str]]]] = None
+    # List of stop loss level tuples:
+    #   - 2-tuple: (drawdown_threshold, gross_reduction) - assumes 'percent' type
+    #   - 3-tuple: (drawdown_threshold, gross_reduction, threshold_type)
+    #
+    # threshold_type can be 'percent' or 'dollar'
+    #
+    # Examples:
+    #   Percent-based:
+    #     [(0.05, 0.75), (0.10, 0.50)] means:
+    #       - At 5% drawdown, reduce gross to 75%
+    #       - At 10% drawdown, reduce gross to 50%
+    #
+    #   Dollar-based:
+    #     [(5000, 0.75, 'dollar'), (10000, 0.50, 'dollar')] means:
+    #       - At $5,000 loss, reduce gross to 75%
+    #       - At $10,000 loss, reduce gross to 50%
+    #
+    #   Mixed:
+    #     [(0.05, 0.75), (10000, 0.50, 'dollar')] means:
+    #       - At 5% drawdown, reduce gross to 75%
+    #       - At $10,000 loss, reduce gross to 50%
+
     def __post_init__(self):
         """Validate configuration."""
         if self.max_adv_participation <= 0 or self.max_adv_participation > 1:
@@ -63,6 +87,30 @@ class BacktestConfig:
             raise ValueError("tc_power must be non-negative")
         if self.initial_cash < 0:
             raise ValueError("initial_cash must be non-negative")
+
+        # Validate stop loss levels if provided
+        if self.stop_loss_levels is not None:
+            for level_tuple in self.stop_loss_levels:
+                if len(level_tuple) == 2:
+                    dd_threshold, gross_reduction = level_tuple
+                    threshold_type = 'percent'
+                elif len(level_tuple) == 3:
+                    dd_threshold, gross_reduction, threshold_type = level_tuple
+                else:
+                    raise ValueError(f"Stop loss level must be 2-tuple or 3-tuple, got {len(level_tuple)}-tuple")
+
+                # Validate based on type
+                if threshold_type == 'percent':
+                    if dd_threshold < 0 or dd_threshold > 1:
+                        raise ValueError(f"Percent drawdown threshold must be in [0, 1], got {dd_threshold}")
+                elif threshold_type == 'dollar':
+                    if dd_threshold < 0:
+                        raise ValueError(f"Dollar drawdown threshold must be non-negative, got {dd_threshold}")
+                else:
+                    raise ValueError(f"threshold_type must be 'percent' or 'dollar', got {threshold_type}")
+
+                if gross_reduction < 0 or gross_reduction > 1:
+                    raise ValueError(f"Gross reduction must be in [0, 1], got {gross_reduction}")
 
 
 @dataclass
@@ -116,6 +164,11 @@ class Portfolio:
             shares * self.prices.get(ticker, 0.0)
             for ticker, shares in self.positions.items()
         )
+
+    @property
+    def portfolio_value(self) -> float:
+        """Convenience property for get_market_value()."""
+        return self.get_market_value()
 
     def get_position_values(self) -> Dict[str, float]:
         """Get market value per position."""

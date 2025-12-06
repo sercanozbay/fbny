@@ -44,6 +44,12 @@ from .data_loader import (
     convert_to_backtester_format
 )
 
+# Stop loss
+from .stop_loss import (
+    StopLossManager,
+    StopLossLevel
+)
+
 __all__ = [
     # Core
     'Backtester',
@@ -71,5 +77,8 @@ __all__ = [
     'ValidationLevel',
     # Large data loading
     'LargeDataLoader',
-    'convert_to_backtester_format'
+    'convert_to_backtester_format',
+    # Stop loss
+    'StopLossManager',
+    'StopLossLevel'
 ]

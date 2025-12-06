@@ -50,6 +50,12 @@ from .stop_loss import (
     StopLossLevel
 )
 
+# Production stop loss functions
+from .stop_loss_production import (
+    calculate_stop_loss_gross,
+    calculate_stop_loss_metrics
+)
+
 __all__ = [
     # Core
     'Backtester',
@@ -80,5 +86,8 @@ __all__ = [
     'convert_to_backtester_format',
     # Stop loss
     'StopLossManager',
-    'StopLossLevel'
+    'StopLossLevel',
+    # Production stop loss
+    'calculate_stop_loss_gross',
+    'calculate_stop_loss_metrics'
 ]

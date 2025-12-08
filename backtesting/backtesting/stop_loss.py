@@ -14,35 +14,43 @@ class StopLossLevel:
     """
     A single stop loss level with optional recovery threshold.
 
-    All thresholds are dollar-based for simplicity.
+    All thresholds are dollar-based drawdown levels for consistency.
 
     Attributes:
     -----------
     drawdown_threshold : float
-        Dollar loss that triggers reduction to this gross level.
-        Example: 5000 means at $5,000 loss from peak
+        Dollar drawdown from peak that triggers entry to this level.
+        Example: 10000 means at $10,000 loss from peak, enter this level
 
     gross_reduction : float
         Target gross exposure as a percentage (e.g., 0.5 means reduce to 50% of normal gross)
 
-    recovery_threshold : Optional[float]
-        Dollar recovery from drawdown bottom that triggers moving back to previous gross level.
-        Example: 2500 means at $2,500 recovery from trough
-        If None, no automatic recovery for this level.
+    recovery_drawdown : Optional[float]
+        Dollar drawdown from peak that triggers exit (recovery) from this level.
+        Must be less than drawdown_threshold.
+        Example: If drawdown_threshold=10000 and recovery_drawdown=7500,
+                 enter at $10k loss, exit when drawdown improves to $7.5k
+        If None, can only exit by reaching a new peak (drawdown=0)
     """
     drawdown_threshold: float
     gross_reduction: float
-    recovery_threshold: Optional[float] = None
+    recovery_drawdown: Optional[float] = None
 
     def __post_init__(self):
         if self.drawdown_threshold < 0:
-            raise ValueError(f"Dollar drawdown threshold must be non-negative, got {self.drawdown_threshold}")
-
-        if self.recovery_threshold is not None and self.recovery_threshold < 0:
-            raise ValueError(f"Dollar recovery threshold must be non-negative, got {self.recovery_threshold}")
+            raise ValueError(f"Drawdown threshold must be non-negative, got {self.drawdown_threshold}")
 
         if self.gross_reduction < 0 or self.gross_reduction > 1:
             raise ValueError(f"Gross reduction must be between 0 and 1, got {self.gross_reduction}")
+
+        if self.recovery_drawdown is not None:
+            if self.recovery_drawdown < 0:
+                raise ValueError(f"Recovery drawdown must be non-negative, got {self.recovery_drawdown}")
+            if self.recovery_drawdown >= self.drawdown_threshold:
+                raise ValueError(
+                    f"Recovery drawdown ({self.recovery_drawdown}) must be less than "
+                    f"drawdown threshold ({self.drawdown_threshold})"
+                )
 
 
 class StopLossManager:
@@ -87,17 +95,19 @@ class StopLossManager:
 
         # Track peak portfolio value and drawdown
         self.peak_value: Optional[float] = None
-        self.trough_value: Optional[float] = None  # Lowest value during current drawdown
         self.current_drawdown_dollar: float = 0.0
-        self.current_recovery_dollar: float = 0.0  # Dollar recovery from trough
         self.current_gross_multiplier: float = 1.0
-        self.triggered_level: Optional[int] = None  # Index of triggered level
+        self.triggered_level: Optional[int] = None  # Index of currently active level
 
     def update(self, portfolio_value: float) -> Tuple[float, bool]:
         """
         Update the stop loss manager with current portfolio value.
 
-        Handles both drawdown triggers and recovery from drawdowns.
+        Uses "sticky" recovery logic:
+        - Enter a level when drawdown >= level's drawdown_threshold
+        - Exit a level when drawdown <= level's recovery_drawdown
+        - Stay at current level if drawdown is between recovery and entry thresholds
+        - New peak clears all stop loss levels
 
         Parameters:
         -----------
@@ -114,48 +124,87 @@ class StopLossManager:
         # Initialize peak if first update
         if self.peak_value is None:
             self.peak_value = portfolio_value
-            self.trough_value = portfolio_value
             return 1.0, False
 
-        # Update peak if new high (clears drawdown)
+        # Update peak if new high (clears all stop loss levels)
         if portfolio_value > self.peak_value:
+            old_level = self.triggered_level
             self.peak_value = portfolio_value
-            self.trough_value = portfolio_value  # Reset trough
+            self.current_drawdown_dollar = 0.0
+            self.triggered_level = None
+            self.current_gross_multiplier = 1.0
+            level_changed = old_level is not None
 
-        # Update trough if new low during drawdown
-        if self.trough_value is None or portfolio_value < self.trough_value:
-            self.trough_value = portfolio_value
+            if level_changed:
+                print(f"\n{'='*60}")
+                print(f"STOP LOSS CLEARED - New Peak")
+                print(f"{'='*60}")
+                print(f"New peak value: ${self.peak_value:,.2f}")
+                print(f"Restoring full gross exposure (100%)")
+                print(f"{'='*60}\n")
 
-        # Calculate current drawdown (from peak)
+            return 1.0, level_changed
+
+        # Calculate current drawdown from peak
         self.current_drawdown_dollar = self.peak_value - portfolio_value
 
-        # Calculate current recovery (from trough)
-        self.current_recovery_dollar = portfolio_value - self.trough_value
-
-        # Determine which level should be active
+        # Determine new level using sticky logic
         new_triggered_level = None
         new_gross_multiplier = 1.0
 
-        # First, check if we should trigger a deeper level (going down)
-        for i, level in enumerate(self.levels):
-            if self.current_drawdown_dollar >= level.drawdown_threshold:
-                new_triggered_level = i
-                new_gross_multiplier = level.gross_reduction
+        if self.triggered_level is None:
+            # Not currently at any level - check if we should enter one
+            for i, level in enumerate(self.levels):
+                if self.current_drawdown_dollar >= level.drawdown_threshold:
+                    new_triggered_level = i
+                    new_gross_multiplier = level.gross_reduction
+        else:
+            # Currently at a level - sticky logic
+            current_level_obj = self.levels[self.triggered_level]
 
-        # Second, check if we should recover to a shallower level (going up)
-        # Only check recovery if we're currently at a level and recovering
-        if self.triggered_level is not None and new_triggered_level == self.triggered_level:
-            # Check if we can move to a less restrictive level
-            current_level = self.levels[self.triggered_level]
-            if current_level.recovery_threshold is not None:
-                if self.current_recovery_dollar >= current_level.recovery_threshold:
-                    # Move to previous (less restrictive) level, or clear if at first level
-                    if self.triggered_level > 0:
-                        new_triggered_level = self.triggered_level - 1
-                        new_gross_multiplier = self.levels[new_triggered_level].gross_reduction
-                    else:
-                        new_triggered_level = None
-                        new_gross_multiplier = 1.0
+            # Check if we should exit current level (recover to less restrictive)
+            if current_level_obj.recovery_drawdown is not None:
+                if self.current_drawdown_dollar <= current_level_obj.recovery_drawdown:
+                    # Exit current level, determine which bracket we're in
+                    # Start from the deepest level and find the first bracket we fall into
+                    for i in range(len(self.levels) - 1, -1, -1):
+                        level_entry = self.levels[i].drawdown_threshold
+                        level_exit = self.levels[i].recovery_drawdown if self.levels[i].recovery_drawdown is not None else 0
+
+                        # Check if current DD is in this level's bracket
+                        # Bracket: [exit_threshold, entry_threshold)
+                        if self.current_drawdown_dollar >= level_exit and self.current_drawdown_dollar < level_entry:
+                            new_triggered_level = i
+                            new_gross_multiplier = self.levels[i].gross_reduction
+                            break
+                        # Special case: if DD >= entry threshold, we're in this level
+                        elif self.current_drawdown_dollar >= level_entry:
+                            new_triggered_level = i
+                            new_gross_multiplier = self.levels[i].gross_reduction
+                            break
+                    # else: recovered below all levels, stay cleared (new_triggered_level = None)
+                else:
+                    # Haven't recovered enough to exit current level
+                    # Check if we should enter a deeper level
+                    for i in range(self.triggered_level + 1, len(self.levels)):
+                        if self.current_drawdown_dollar >= self.levels[i].drawdown_threshold:
+                            new_triggered_level = i
+                            new_gross_multiplier = self.levels[i].gross_reduction
+
+                    # If no deeper level triggered, stay at current level
+                    if new_triggered_level is None or new_triggered_level == self.triggered_level:
+                        new_triggered_level = self.triggered_level
+                        new_gross_multiplier = current_level_obj.gross_reduction
+            else:
+                # No recovery threshold - can only exit at new peak
+                # But check if we should enter deeper level
+                new_triggered_level = self.triggered_level
+                new_gross_multiplier = current_level_obj.gross_reduction
+
+                for i in range(self.triggered_level + 1, len(self.levels)):
+                    if self.current_drawdown_dollar >= self.levels[i].drawdown_threshold:
+                        new_triggered_level = i
+                        new_gross_multiplier = self.levels[i].gross_reduction
 
         # Check if level changed
         level_changed = new_triggered_level != self.triggered_level
@@ -163,30 +212,30 @@ class StopLossManager:
         # Print notifications
         if level_changed:
             if new_triggered_level is not None and (self.triggered_level is None or new_triggered_level > self.triggered_level):
-                # Moving to more restrictive level (drawdown)
+                # Moving to more restrictive level (deeper drawdown)
                 triggered_level_obj = self.levels[new_triggered_level]
                 print(f"\n{'='*60}")
                 print(f"STOP LOSS TRIGGERED - Level {new_triggered_level + 1}")
                 print(f"{'='*60}")
                 print(f"Peak value: ${self.peak_value:,.2f}")
-                print(f"Trough value: ${self.trough_value:,.2f}")
                 print(f"Current value: ${portfolio_value:,.2f}")
                 print(f"Dollar drawdown: ${self.current_drawdown_dollar:,.2f}")
-                print(f"Threshold: ${triggered_level_obj.drawdown_threshold:,.2f}")
+                print(f"Entry threshold: ${triggered_level_obj.drawdown_threshold:,.2f}")
+                if triggered_level_obj.recovery_drawdown is not None:
+                    print(f"Recovery threshold: ${triggered_level_obj.recovery_drawdown:,.2f}")
                 print(f"Reducing gross exposure to {new_gross_multiplier:.1%}")
                 print(f"{'='*60}\n")
             elif new_triggered_level is None or (self.triggered_level is not None and new_triggered_level < self.triggered_level):
                 # Moving to less restrictive level or clearing (recovery)
                 print(f"\n{'='*60}")
                 if new_triggered_level is None:
-                    print(f"STOP LOSS CLEARED - Full Recovery")
+                    print(f"STOP LOSS RECOVERY - Cleared")
                 else:
                     print(f"STOP LOSS RECOVERY - Moving to Level {new_triggered_level + 1}")
                 print(f"{'='*60}")
                 print(f"Peak value: ${self.peak_value:,.2f}")
-                print(f"Trough value: ${self.trough_value:,.2f}")
                 print(f"Current value: ${portfolio_value:,.2f}")
-                print(f"Dollar recovery: ${self.current_recovery_dollar:,.2f}")
+                print(f"Dollar drawdown: ${self.current_drawdown_dollar:,.2f}")
                 if new_triggered_level is None:
                     print(f"Restoring full gross exposure (100%)")
                 else:
@@ -243,9 +292,7 @@ class StopLossManager:
         """
         return {
             'peak_value': self.peak_value,
-            'trough_value': self.trough_value,
             'current_drawdown_dollar': self.current_drawdown_dollar,
-            'current_recovery_dollar': self.current_recovery_dollar,
             'gross_multiplier': self.current_gross_multiplier,
             'triggered_level': self.triggered_level,
             'is_active': self.triggered_level is not None
@@ -254,8 +301,6 @@ class StopLossManager:
     def reset(self):
         """Reset the stop loss manager (e.g., for a new backtest)."""
         self.peak_value = None
-        self.trough_value = None
         self.current_drawdown_dollar = 0.0
-        self.current_recovery_dollar = 0.0
         self.current_gross_multiplier = 1.0
         self.triggered_level = None

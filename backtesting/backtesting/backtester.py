@@ -95,7 +95,7 @@ class Backtester:
             tolerance=config.optimizer_tolerance
         )
 
-        # Stop loss manager (for use cases 1 and 2) - all dollar-based
+        # Stop loss manager (for use cases 1 and 2) - all dollar-based drawdown levels
         self.stop_loss_manager: Optional[StopLossManager] = None
         if config.stop_loss_levels is not None:
             levels = []
@@ -105,14 +105,14 @@ class Backtester:
                     levels.append(StopLossLevel(
                         drawdown_threshold=dd,
                         gross_reduction=gr,
-                        recovery_threshold=None
+                        recovery_drawdown=None
                     ))
                 elif len(level_tuple) == 3:
-                    dd, gr, recovery = level_tuple
+                    dd, gr, recovery_dd = level_tuple
                     levels.append(StopLossLevel(
                         drawdown_threshold=dd,
                         gross_reduction=gr,
-                        recovery_threshold=recovery
+                        recovery_drawdown=recovery_dd
                     ))
             self.stop_loss_manager = StopLossManager(levels)
 

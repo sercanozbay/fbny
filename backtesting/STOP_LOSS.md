@@ -2,25 +2,49 @@
 
 ## Overview
 
-The stop loss system provides automatic risk management by reducing gross exposure when the portfolio experiences dollar-based drawdowns. It also supports **recovery thresholds** that automatically restore exposure as the portfolio recovers from drawdowns.
+The stop loss system provides automatic risk management by reducing gross exposure when the portfolio experiences dollar-based drawdowns. It uses **sticky recovery logic** with drawdown-based thresholds to prevent unnecessary fluctuations in position sizes.
 
 ## Key Concepts
 
 ### Drawdown
 - Measured in **dollars** from the peak portfolio value
-- Triggers stop loss levels when specified dollar thresholds are exceeded
+- Both entry and exit thresholds use drawdown from peak for consistency
 - Example: If peak is $100,000 and current value is $95,000, drawdown is $5,000
 
-### Recovery
-- Measured in **dollars** from the trough (lowest point during the current drawdown)
-- Moves back to less restrictive stop loss levels when recovery thresholds are met
-- Full recovery to a new peak clears the stop loss entirely
-- Example: If trough is $85,000 and current value is $92,500, recovery is $7,500
+### Sticky Recovery Logic
 
-### Trough Tracking
-- The trough is the lowest portfolio value reached during a drawdown period
-- It resets when a new peak is achieved
-- Recovery is measured from this trough value
+**What is "Sticky"?**
+Once you enter a stop loss level, you **STAY** at that level until:
+1. Drawdown improves to ≤ the recovery threshold (bracket-based exit), OR
+2. Drawdown worsens and triggers a deeper level, OR
+3. Portfolio reaches a new peak (clears all stop loss)
+
+**Key benefit**: The gross multiplier doesn't change just because drawdown fluctuates within the current bracket. This prevents rapid trading from unnecessary level changes.
+
+### Bracket-Based Recovery
+
+Each level defines a "bracket" based on its entry and exit thresholds:
+
+**Example with two levels:**
+- Level 1: Enter at $5k DD, Exit at $2k DD → 75% gross
+- Level 2: Enter at $10k DD, Exit at $5k DD → 50% gross
+
+**This creates three brackets:**
+- Bracket 0 (Clear): [0, $2k) → 100% gross
+- Bracket 1: [$2k, $5k) → 75% gross
+- Bracket 2: [$5k, $10k) → 50% gross
+- Level 3: [$10k, ∞) → 50% gross
+
+**When recovering:**
+If at Level 2 with DD=$12k, then DD improves to $4.5k:
+- Exit Level 2 because DD=$4.5k ≤ $5k recovery threshold
+- Find bracket: DD=$4.5k is in Bracket 1 [$2k, $5k)
+- Enter Level 1 (75% gross)
+
+**Sticky behavior:**
+If at Level 1 with DD=$4.5k, then DD fluctuates to $4k or $4.8k:
+- STAY at Level 1 (75% gross)
+- Only exit when DD ≤ $2k or DD ≥ $5k (enters Level 2)
 
 ## Configuration Formats
 
@@ -34,13 +58,15 @@ stop_loss_levels = [
 ]
 ```
 
-### 3-Tuple Format (With Recovery)
+### 3-Tuple Format (With Recovery - RECOMMENDED)
 ```python
 stop_loss_levels = [
-    (5000, 0.75, 2500),   # $5k loss → 75%, recover at $2.5k from bottom
-    (10000, 0.50, 5000),  # $10k loss → 50%, recover at $5k from bottom
+    (5000, 0.75, 2000),   # Enter at $5k DD, Exit at $2k DD → 75% gross
+    (10000, 0.50, 5000),  # Enter at $10k DD, Exit at $5k DD → 50% gross
 ]
 ```
+
+**Important**: The third value is the recovery_drawdown (exit threshold), measured as drawdown from peak, NOT recovery from trough.
 
 ## Example Usage
 
@@ -50,41 +76,56 @@ from backtesting import BacktestConfig
 config = BacktestConfig(
     initial_cash=100000.0,
     stop_loss_levels=[
-        (5000, 0.75, 2500),    # Level 1: $5k loss → 75% gross
-        (10000, 0.50, 5000),   # Level 2: $10k loss → 50% gross
-        (15000, 0.25, 7500),   # Level 3: $15k loss → 25% gross
+        (5000, 0.75, 2000),    # Level 1: Enter $5k DD, Exit $2k DD → 75% gross
+        (10000, 0.50, 5000),   # Level 2: Enter $10k DD, Exit $5k DD → 50% gross
+        (15000, 0.25, 10000),  # Level 3: Enter $15k DD, Exit $10k DD → 25% gross
     ]
 )
 ```
 
-## Detailed Example Scenario
+## Detailed Example Scenario (Sticky Logic)
+
+Using levels: [(5000, 0.75, 2000), (10000, 0.50, 5000)]
 
 Starting with $100,000 portfolio:
 
-1. **Portfolio at $100,000** (peak)
-2. **Drops to $95,000** ($5k loss) → **Triggers Level 1: 75% gross**
-   - System reduces target positions to 75% of normal size
-3. **Drops to $90,000** ($10k loss) → **Triggers Level 2: 50% gross**
-   - System further reduces to 50% of normal size
-4. **Drops to $85,000** ($15k loss) → **Triggers Level 3: 25% gross** (trough)
-   - System reduces to 25% of normal size
-5. **Recovers to $92,500** ($7,500 recovery from $85k) → **Back to Level 2: 50% gross**
-   - Recovery threshold of $7,500 met, moves to less restrictive level
-6. **Recovers to $97,500** ($5,000 recovery from $92.5k) → **Back to Level 1: 75% gross**
-   - Recovery threshold of $5,000 met, moves to next less restrictive level
-7. **Recovers to $100,000** ($2,500 recovery from $97.5k) → **Cleared: 100% gross**
-   - Recovery threshold of $2,500 met, stop loss fully cleared
-8. **Reaches $102,000** → **New peak established, stop loss remains cleared**
+| Portfolio | Drawdown | Level | Gross | Explanation |
+|-----------|----------|-------|-------|-------------|
+| $100,000  | $0       | None  | 100%  | Peak |
+| $94,000   | $6,000   | 1     | 75%   | **Entered Level 1** (DD=$6k ≥ $5k entry) |
+| $95,000   | $5,000   | 1     | 75%   | **Sticky** (DD in bracket [$2k, $5k)) |
+| $96,000   | $4,000   | 1     | 75%   | **Sticky** (DD in bracket [$2k, $5k)) |
+| $94,500   | $5,500   | 1     | 75%   | **Sticky** (DD in bracket [$2k, $5k)) |
+| $89,000   | $11,000  | 2     | 50%   | **Entered Level 2** (DD=$11k ≥ $10k entry) |
+| $90,000   | $10,000  | 2     | 50%   | **Sticky** (DD in bracket [$5k, $10k)) |
+| $93,000   | $7,000   | 2     | 50%   | **Sticky** (DD in bracket [$5k, $10k)) |
+| $95,500   | $4,500   | 1     | 75%   | **Exited Level 2** (DD≤$5k), **Bracket 1** |
+| $96,000   | $4,000   | 1     | 75%   | **Sticky** at Level 1 |
+| $98,500   | $1,500   | None  | 100%  | **Exited Level 1** (DD≤$2k), **Bracket 0** |
+| $99,000   | $1,000   | None  | 100%  | **Sticky** at 100% (no level) |
+| $102,000  | $0       | None  | 100%  | **New peak**, stop loss cleared |
+
+### Key Observations
+
+1. **Entry**: When DD crosses entry threshold ($5k, $10k), you enter that level
+2. **Sticky**: Once at a level, you STAY there even as DD fluctuates within the bracket
+3. **Exit**: When DD improves past exit threshold ($2k, $5k), you exit to the bracket below
+4. **No bouncing**: On row 4-5, DD goes from $4k to $5.5k, but stays at 75% (sticky!)
+5. **Bracket-based**: On row 9, DD=$4.5k enters Bracket 1 [$2k, $5k), so 75% gross
 
 ## Important Rules
 
-1. **Dollar-Based Only**: All thresholds are specified in dollars for simplicity. This makes it easy to understand and configure based on your portfolio size.
+1. **Dollar-Based Drawdowns**: All thresholds (entry and exit) are specified as dollar drawdown from peak. This makes it easy to understand and configure based on your portfolio size.
 
-2. **Recovery Direction**: Recovery always moves to the **previous** (less restrictive) level, or clears the stop loss entirely if recovering from the first level.
+2. **Sticky Behavior**: Once at a level, you STAY there until explicitly crossing an exit or entry threshold. Fluctuations within a bracket don't change the level.
 
-3. **Sequential Application**: The system checks levels in order and applies the deepest level that is triggered.
+3. **Bracket-Based Recovery**: When exiting a level, the system finds which bracket the current drawdown falls into and enters that level. This ensures smooth transitions.
 
-4. **Optional Recovery**: Recovery thresholds are optional. If not specified, the stop loss will remain at the triggered level until a new peak is reached.
+4. **Recovery Must Be Less Than Entry**: The recovery_drawdown (exit threshold) must be less than drawdown_threshold (entry threshold) for each level. Example: Entry=$5k, Exit=$2k is valid.
+
+5. **Optional Recovery**: Recovery thresholds are optional (2-tuple format). If not specified, the stop loss remains at the triggered level until a new peak is reached.
+
+6. **New Peak Clears All**: Reaching a new portfolio peak clears all stop loss levels and resets to 100% gross.
 
 ## Use Case Support
 
@@ -95,27 +136,36 @@ Starting with $100,000 portfolio:
 ## Benefits
 
 1. **Simple Configuration**: Dollar-based thresholds are easy to understand and configure
-2. **Dynamic Risk Management**: Automatically reduces exposure during drawdowns
-3. **Gradual Recovery**: Incrementally restores exposure as portfolio recovers
-4. **Clear Notifications**: Prints detailed messages when levels trigger or clear
-5. **Flexible**: Supports multiple cascading levels with different thresholds
+2. **Sticky Logic**: Prevents unnecessary trading from rapid level changes within a bracket
+3. **Consistent Semantics**: All thresholds use drawdown from peak (not mixed with trough recovery)
+4. **Bracket-Based Recovery**: Smooth transitions between levels based on which bracket you're in
+5. **Dynamic Risk Management**: Automatically reduces exposure during drawdowns
+6. **Clear Notifications**: Prints detailed messages when levels trigger or clear
+7. **Flexible**: Supports multiple cascading levels with different thresholds
 
 ## Testing
 
 Comprehensive tests are provided:
 
-1. **test_stop_loss.py** - Basic stop loss functionality tests
-2. **test_stop_loss_dollar.py** - Dollar threshold tests (no recovery)
-3. **test_stop_loss_trigger.py** - Verification that stop loss actually reduces positions
-4. **test_stop_loss_recovery_demo.py** - Demonstrates recovery through all levels
+1. **test_sticky_recovery.py** - Backtester integration test demonstrating sticky logic
+2. **test_production_sticky_recovery.py** - Production function tests with 7 comprehensive scenarios
+3. **example_production_stop_loss.py** - Example usage scripts for production functions
 
-Run all tests:
+Run the tests:
 ```bash
-python test_stop_loss.py
-python test_stop_loss_dollar.py
-python test_stop_loss_trigger.py
-python test_stop_loss_recovery_demo.py
+python test_sticky_recovery.py
+python test_production_sticky_recovery.py
+python example_production_stop_loss.py
 ```
+
+### What the Tests Demonstrate
+
+- **Sticky behavior**: Levels don't change when DD fluctuates within a bracket
+- **Bracket-based recovery**: Proper transitions when exiting levels
+- **No bouncing**: Prevents rapid level changes from small DD fluctuations
+- **New peak clearing**: Reaching new peak clears all stop loss
+- **Multiple levels**: Correct behavior with 2+ cascading levels
+- **Input validation**: Ensures recovery_drawdown < drawdown_threshold
 
 ## Implementation Details
 
@@ -123,26 +173,33 @@ python test_stop_loss_recovery_demo.py
 ```python
 @dataclass
 class StopLossLevel:
-    drawdown_threshold: float        # Dollar loss from peak
+    drawdown_threshold: float        # Dollar drawdown from peak to ENTER this level
     gross_reduction: float           # Target gross as percentage (0-1)
-    recovery_threshold: Optional[float] = None  # Dollar recovery from trough
+    recovery_drawdown: Optional[float] = None  # Dollar drawdown from peak to EXIT this level
 ```
 
 ### StopLossManager State
 - `peak_value`: Highest portfolio value reached
-- `trough_value`: Lowest value during current drawdown
-- `current_drawdown_dollar`: Current dollar loss from peak
-- `current_recovery_dollar`: Current dollar recovery from trough
+- `current_drawdown_dollar`: Current dollar drawdown from peak
 - `triggered_level`: Currently active stop loss level (None if cleared)
 - `current_gross_multiplier`: Current multiplier to apply to positions
 
-### Update Logic
-1. Track peak and trough values
-2. Calculate current drawdown and recovery in dollars
-3. Check if deeper level should be triggered (going down)
-4. Check if recovery threshold is met to move to shallower level (going up)
-5. Update gross multiplier based on active level
-6. Print notifications when levels change
+### Update Logic (Sticky)
+
+**When NOT at any level:**
+1. Check if current DD exceeds any entry threshold → Enter that level
+
+**When at a level (STICKY):**
+1. Check if DD ≤ recovery_drawdown → Exit current level
+   - Find which bracket current DD falls into
+   - Enter that bracket's level (bracket-based recovery)
+2. Check if DD exceeds deeper level's entry threshold → Enter deeper level
+3. Otherwise → STAY at current level (sticky!)
+
+**Special case:**
+- New peak (portfolio > peak_value) → Clear all levels, reset to 100%
+
+This sticky logic prevents unnecessary level changes from DD fluctuations within a bracket.
 
 ## Best Practices
 
@@ -150,23 +207,25 @@ class StopLossLevel:
 
 2. **Use Decreasing Gross Reductions**: Each level should have a lower gross reduction than the previous level (e.g., 75%, 50%, 25%).
 
-3. **Set Recovery at 50%**: A common approach is to set recovery thresholds at about 50% of the drawdown amount for each level.
+3. **Set Recovery Below Entry**: Recovery_drawdown (exit threshold) should be meaningfully below drawdown_threshold (entry threshold) to create clear brackets. Example: Entry=$10k, Exit=$5k creates a $5k-$10k bracket.
 
-4. **Test Before Using**: Run backtests with your stop loss configuration to ensure it behaves as expected for your strategy.
+4. **Non-Overlapping Brackets**: Set recovery thresholds to match the next level's entry threshold for clean transitions. Example:
+   - Level 1: Entry=$5k, Exit=$2k
+   - Level 2: Entry=$10k, Exit=$5k (← matches Level 1 exit)
 
-5. **Monitor Notifications**: The system prints clear messages when stop loss levels trigger or clear, making it easy to understand what's happening during a backtest.
+5. **Test Before Using**: Run backtests with your stop loss configuration to ensure it behaves as expected for your strategy.
+
+6. **Monitor Notifications**: The system prints clear messages when stop loss levels trigger or clear, making it easy to understand what's happening during a backtest.
 
 ## Limitations
 
 1. **Dollar-Based Only**: The system does not support percentage-based thresholds. This is by design for simplicity.
 
-2. **Sequential Recovery**: Recovery moves through levels one at a time, not directly from level 3 to level 1.
+2. **Bracket-Based Recovery**: When exiting a level, you enter the bracket your DD falls into. You cannot skip brackets.
 
-3. **No Partial Recovery**: Recovery requires reaching the full threshold to trigger level changes.
+3. **Use Case 3 Exclusion**: External trades bypass stop loss (by design, since they are pre-determined).
 
-4. **Use Case 3 Exclusion**: External trades bypass stop loss (by design, since they are pre-determined).
-
-5. **Daily Frequency**: Stop loss is evaluated once per day based on end-of-day portfolio values.
+4. **Daily Frequency**: Stop loss is evaluated once per day based on end-of-day portfolio values.
 
 ## Production Functions
 
@@ -174,20 +233,20 @@ For live trading or post-hoc analysis, you can use standalone production functio
 
 ### calculate_stop_loss_gross
 
-Calculate gross exposure multipliers from daily PnL.
+Calculate gross exposure multipliers from daily PnL using sticky recovery logic.
 
 ```python
 from backtesting import calculate_stop_loss_gross
 import pandas as pd
 
 # Your daily PnL series
-daily_pnl = pd.Series([0, -500, -800, 300, 400],
+daily_pnl = pd.Series([0, -6000, 1000, 1000, 2500],
                        index=pd.date_range('2023-01-01', periods=5))
 
-# Define stop loss levels
+# Define stop loss levels with sticky recovery
 levels = [
-    (5000, 0.75, 2500),   # $5k loss → 75%, recover at $2.5k
-    (10000, 0.50, 5000),  # $10k loss → 50%, recover at $5k
+    (5000, 0.75, 2000),   # Enter at $5k DD, Exit at $2k DD
+    (10000, 0.50, 5000),  # Enter at $10k DD, Exit at $5k DD
 ]
 
 # Calculate gross multipliers
@@ -198,17 +257,17 @@ gross_multipliers = calculate_stop_loss_gross(
 )
 
 print(gross_multipliers)
-# 2023-01-01    1.00
-# 2023-01-02    1.00
-# 2023-01-03    1.00
-# 2023-01-04    1.00
-# 2023-01-05    1.00
+# 2023-01-01    1.00  # $0 DD
+# 2023-01-02    0.75  # $6k DD → Enter Level 1
+# 2023-01-03    0.75  # $5k DD → STICKY (in bracket)
+# 2023-01-04    0.75  # $4k DD → STICKY (in bracket)
+# 2023-01-05    1.00  # $1.5k DD → Exit Level 1
 # dtype: float64
 ```
 
 ### calculate_stop_loss_metrics
 
-Get detailed metrics including drawdowns, recovery, and triggered levels.
+Get detailed metrics including drawdowns, triggered levels, and gross multipliers.
 
 ```python
 from backtesting import calculate_stop_loss_metrics
@@ -220,12 +279,12 @@ metrics = calculate_stop_loss_metrics(
 )
 
 print(metrics)
-#             portfolio_value  peak_value  trough_value  drawdown_dollar  recovery_dollar triggered_level  gross_multiplier
-# 2023-01-01           100000      100000        100000                0                0            None              1.00
-# 2023-01-02            99500      100000         99500              500                0            None              1.00
-# 2023-01-03            98700      100000         98700             1300                0            None              1.00
-# 2023-01-04            99000      100000         98700             1000              300            None              1.00
-# 2023-01-05            99400      100000         98700              600              700            None              1.00
+#             portfolio_value  peak_value  drawdown_dollar triggered_level  gross_multiplier
+# 2023-01-01           100000      100000                0            None              1.00
+# 2023-01-02            94000      100000             6000               0              0.75
+# 2023-01-03            95000      100000             5000               0              0.75
+# 2023-01-04            96000      100000             4000               0              0.75
+# 2023-01-05            98500      100000             1500            None              1.00
 ```
 
 ### Input Formats

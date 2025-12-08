@@ -56,29 +56,39 @@ class BacktestConfig:
     initial_positions: Optional[Dict[str, float]] = None  # Initial holdings (ticker: shares)
 
     # Stop loss configuration (use cases 1 and 2 only)
-    # All thresholds are dollar-based for simplicity
+    # All thresholds are dollar-based drawdown levels for consistency
     stop_loss_levels: Optional[List[Union[
         Tuple[float, float],
         Tuple[float, float, Optional[float]]
     ]]] = None
     # List of stop loss level tuples (dollar-based):
-    #   - 2-tuple: (drawdown_threshold, gross_reduction) - no recovery
-    #   - 3-tuple: (drawdown_threshold, gross_reduction, recovery_threshold)
+    #   - 2-tuple: (drawdown_threshold, gross_reduction) - no automatic recovery
+    #   - 3-tuple: (drawdown_threshold, gross_reduction, recovery_drawdown)
     #
-    # drawdown_threshold: Dollar loss from peak that triggers this level (e.g., 5000 = $5,000 loss)
+    # drawdown_threshold: Dollar drawdown from peak that ENTERS this level (e.g., 10000 = enter at $10k loss)
     # gross_reduction: Target gross exposure as percentage (e.g., 0.75 = 75% of normal gross)
-    # recovery_threshold: Dollar recovery from trough to move back to previous level (optional)
+    # recovery_drawdown: Dollar drawdown from peak that EXITS this level (optional, must be < drawdown_threshold)
+    #
+    # STICKY RECOVERY: Once at a level, stay there until drawdown improves past recovery_drawdown
     #
     # Examples:
     #   Without recovery:
     #     [(5000, 0.75), (10000, 0.50)] means:
-    #       - At $5k loss, reduce gross to 75% (no automatic recovery)
-    #       - At $10k loss, reduce gross to 50% (no automatic recovery)
+    #       - At $5k drawdown, reduce gross to 75% (stay until new peak)
+    #       - At $10k drawdown, reduce gross to 50% (stay until new peak)
     #
-    #   With recovery:
-    #     [(5000, 0.75, 2500), (10000, 0.50, 5000)] means:
-    #       - At $5k loss, reduce gross to 75%; recover to 100% when portfolio recovers $2,500 from bottom
-    #       - At $10k loss, reduce gross to 50%; recover to 75% when portfolio recovers $5,000 from bottom
+    #   With recovery (RECOMMENDED):
+    #     [(5000, 0.75, 2500), (10000, 0.50, 5000), (15000, 0.25, 10000)] means:
+    #       - Enter at $5k drawdown → 75% gross, exit when drawdown ≤ $2.5k
+    #       - Enter at $10k drawdown → 50% gross, exit when drawdown ≤ $5k (back to 75%)
+    #       - Enter at $15k drawdown → 25% gross, exit when drawdown ≤ $10k (back to 50%)
+    #
+    #     Recovery sequence example:
+    #       Portfolio: $100k → $85k (15k DD) → triggers 25% gross
+    #       Portfolio: $85k → $95k (5k DD) → stays at 25% (DD > $10k recovery threshold)
+    #       Portfolio: $95k → $91k (9k DD) → recovers to 50% gross (DD ≤ $10k recovery)
+    #       Portfolio: $91k → $96k (4k DD) → recovers to 75% gross (DD ≤ $5k recovery)
+    #       Portfolio: $96k → $102k (0k DD) → fully cleared at new peak
 
     def __post_init__(self):
         """Validate configuration."""
@@ -89,28 +99,34 @@ class BacktestConfig:
         if self.initial_cash < 0:
             raise ValueError("initial_cash must be non-negative")
 
-        # Validate stop loss levels if provided (all dollar-based)
+        # Validate stop loss levels if provided (all dollar-based drawdown levels)
         if self.stop_loss_levels is not None:
             for level_tuple in self.stop_loss_levels:
                 if len(level_tuple) == 2:
                     dd_threshold, gross_reduction = level_tuple
-                    recovery_threshold = None
+                    recovery_drawdown = None
                 elif len(level_tuple) == 3:
-                    dd_threshold, gross_reduction, recovery_threshold = level_tuple
+                    dd_threshold, gross_reduction, recovery_drawdown = level_tuple
                 else:
                     raise ValueError(f"Stop loss level must be 2-tuple or 3-tuple, got {len(level_tuple)}-tuple")
 
-                # Validate drawdown threshold (dollar-based)
+                # Validate drawdown threshold
                 if dd_threshold < 0:
-                    raise ValueError(f"Dollar drawdown threshold must be non-negative, got {dd_threshold}")
+                    raise ValueError(f"Drawdown threshold must be non-negative, got {dd_threshold}")
 
                 # Validate gross reduction
                 if gross_reduction < 0 or gross_reduction > 1:
                     raise ValueError(f"Gross reduction must be in [0, 1], got {gross_reduction}")
 
-                # Validate recovery threshold if provided (dollar-based)
-                if recovery_threshold is not None and recovery_threshold < 0:
-                    raise ValueError(f"Dollar recovery threshold must be non-negative, got {recovery_threshold}")
+                # Validate recovery drawdown if provided
+                if recovery_drawdown is not None:
+                    if recovery_drawdown < 0:
+                        raise ValueError(f"Recovery drawdown must be non-negative, got {recovery_drawdown}")
+                    if recovery_drawdown >= dd_threshold:
+                        raise ValueError(
+                            f"Recovery drawdown ({recovery_drawdown}) must be less than "
+                            f"drawdown threshold ({dd_threshold})"
+                        )
 
 
 @dataclass

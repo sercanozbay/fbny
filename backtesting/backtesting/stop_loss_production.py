@@ -2,7 +2,9 @@
 Production Stop Loss Calculator
 
 Standalone function for calculating stop loss gross reductions based on
-daily PnL time series. Can be used for live trading or post-hoc analysis.
+daily PnL time series using sticky recovery logic.
+
+All thresholds are drawdown levels from peak for consistency.
 """
 
 import pandas as pd
@@ -17,10 +19,10 @@ def calculate_stop_loss_gross(
     dates: Optional[Union[pd.DatetimeIndex, List]] = None
 ) -> pd.Series:
     """
-    Calculate gross exposure multipliers based on dollar-based stop loss levels.
+    Calculate gross exposure multipliers using sticky recovery logic.
 
-    This is a production-ready function that processes a daily PnL time series
-    and returns the gross exposure multiplier that should be applied each day.
+    Uses drawdown-based thresholds with sticky behavior: once at a level,
+    stay there until drawdown improves past the recovery threshold.
 
     Parameters:
     -----------
@@ -31,14 +33,18 @@ def calculate_stop_loss_gross(
     stop_loss_levels : List[Tuple]
         List of stop loss levels, each specified as:
         - 2-tuple: (drawdown_threshold, gross_reduction)
-        - 3-tuple: (drawdown_threshold, gross_reduction, recovery_threshold)
+        - 3-tuple: (drawdown_threshold, gross_reduction, recovery_drawdown)
 
         Where:
-        - drawdown_threshold: Dollar loss from peak that triggers this level
+        - drawdown_threshold: Dollar drawdown from peak to ENTER this level
         - gross_reduction: Target gross exposure (0-1, e.g., 0.75 = 75%)
-        - recovery_threshold: Optional dollar recovery from trough to move back
+        - recovery_drawdown: Dollar drawdown from peak to EXIT this level (optional)
 
-        Example: [(5000, 0.75, 2500), (10000, 0.50, 5000)]
+        STICKY LOGIC: Once at a level, stay there until drawdown ≤ recovery_drawdown
+
+        Example: [(5000, 0.75, 2000), (10000, 0.50, 5000)]
+        - Enter at $5k DD → 75% gross, exit when DD ≤ $2k
+        - Enter at $10k DD → 50% gross, exit when DD ≤ $5k
 
     initial_capital : float
         Starting capital/portfolio value in dollars
@@ -55,18 +61,16 @@ def calculate_stop_loss_gross(
 
     Examples:
     ---------
-    >>> daily_pnl = pd.Series([0, 100, -200, -300, 50, 100],
-    ...                        index=pd.date_range('2023-01-01', periods=6))
-    >>> levels = [(500, 0.75, 250), (1000, 0.50, 500)]
-    >>> gross = calculate_stop_loss_gross(daily_pnl, levels, initial_capital=10000)
-    >>> print(gross)
-    2023-01-01    1.00
-    2023-01-02    1.00
-    2023-01-03    1.00
-    2023-01-04    0.75
-    2023-01-05    0.75
-    2023-01-06    1.00
-    dtype: float64
+    >>> # Sticky recovery example
+    >>> daily_pnl = pd.Series([0, -6000, 1000, 1000, 2000],
+    ...                        index=pd.date_range('2023-01-01', periods=5))
+    >>> levels = [(5000, 0.75, 2000)]
+    >>> gross = calculate_stop_loss_gross(daily_pnl, levels, initial_capital=100000)
+    >>> # Day 0: $0 DD → 100%
+    >>> # Day 1: $6k DD → 75% (entered level)
+    >>> # Day 2: $5k DD → 75% (sticky, DD > $2k recovery)
+    >>> # Day 3: $4k DD → 75% (sticky, DD > $2k recovery)
+    >>> # Day 4: $2k DD → 75% (sticky, DD = $2k recovery, need DD ≤ $2k)
     """
     # Convert inputs to pandas Series if needed
     if isinstance(daily_pnl, np.ndarray):
@@ -86,9 +90,9 @@ def calculate_stop_loss_gross(
     for level_tuple in stop_loss_levels:
         if len(level_tuple) == 2:
             dd_threshold, gross_reduction = level_tuple
-            recovery_threshold = None
+            recovery_drawdown = None
         elif len(level_tuple) == 3:
-            dd_threshold, gross_reduction, recovery_threshold = level_tuple
+            dd_threshold, gross_reduction, recovery_drawdown = level_tuple
         else:
             raise ValueError(f"Stop loss level must be 2-tuple or 3-tuple, got {len(level_tuple)}-tuple")
 
@@ -97,13 +101,19 @@ def calculate_stop_loss_gross(
             raise ValueError(f"Drawdown threshold must be non-negative, got {dd_threshold}")
         if gross_reduction < 0 or gross_reduction > 1:
             raise ValueError(f"Gross reduction must be in [0, 1], got {gross_reduction}")
-        if recovery_threshold is not None and recovery_threshold < 0:
-            raise ValueError(f"Recovery threshold must be non-negative, got {recovery_threshold}")
+        if recovery_drawdown is not None:
+            if recovery_drawdown < 0:
+                raise ValueError(f"Recovery drawdown must be non-negative, got {recovery_drawdown}")
+            if recovery_drawdown >= dd_threshold:
+                raise ValueError(
+                    f"Recovery drawdown ({recovery_drawdown}) must be less than "
+                    f"drawdown threshold ({dd_threshold})"
+                )
 
         levels.append({
             'drawdown_threshold': dd_threshold,
             'gross_reduction': gross_reduction,
-            'recovery_threshold': recovery_threshold
+            'recovery_drawdown': recovery_drawdown
         })
 
     # Sort levels by drawdown threshold
@@ -126,52 +136,81 @@ def calculate_stop_loss_gross(
 
     # Track state
     peak_value = initial_capital
-    trough_value = initial_capital
     current_level = None  # Index of currently triggered level (None = no stop loss)
 
-    # Process each day
+    # Process each day using sticky recovery logic
     for i, (date, pnl) in enumerate(daily_pnl.items()):
         portfolio_value = portfolio_values.iloc[i]
 
-        # Update peak if new high
+        # Update peak if new high (clears all stop loss)
         if portfolio_value > peak_value:
             peak_value = portfolio_value
-            trough_value = portfolio_value
-            current_level = None  # Clear stop loss at new peak
+            current_level = None
             gross_multipliers.iloc[i] = 1.0
             continue
 
-        # Update trough if new low
-        if portfolio_value < trough_value:
-            trough_value = portfolio_value
-
-        # Calculate current drawdown and recovery
+        # Calculate current drawdown from peak
         current_drawdown = peak_value - portfolio_value
-        current_recovery = portfolio_value - trough_value
 
-        # Determine which level should be active
+        # Determine new level using sticky logic
         new_level = None
         new_gross = 1.0
 
-        # Check if we should trigger a deeper level (going down)
-        for idx, level in enumerate(levels):
-            if current_drawdown >= level['drawdown_threshold']:
-                new_level = idx
-                new_gross = level['gross_reduction']
+        if current_level is None:
+            # Not currently at any level - check if we should enter one
+            for idx, level in enumerate(levels):
+                if current_drawdown >= level['drawdown_threshold']:
+                    new_level = idx
+                    new_gross = level['gross_reduction']
+        else:
+            # Currently at a level - sticky logic
+            current_level_obj = levels[current_level]
 
-        # Check if we should recover to a shallower level (going up)
-        # Only check recovery if we're currently at a level and haven't found a deeper trigger
-        if current_level is not None and new_level == current_level:
-            level = levels[current_level]
-            if level['recovery_threshold'] is not None:
-                if current_recovery >= level['recovery_threshold']:
-                    # Move to previous (less restrictive) level, or clear
-                    if current_level > 0:
-                        new_level = current_level - 1
-                        new_gross = levels[new_level]['gross_reduction']
-                    else:
-                        new_level = None
-                        new_gross = 1.0
+            # Check if we should exit current level (recover to less restrictive)
+            if current_level_obj['recovery_drawdown'] is not None:
+                if current_drawdown <= current_level_obj['recovery_drawdown']:
+                    # Exit current level, determine which bracket we're in
+                    # Start from the deepest level and find the first bracket we fall into
+                    for idx in range(len(levels) - 1, -1, -1):
+                        level_entry = levels[idx]['drawdown_threshold']
+                        level_exit = levels[idx]['recovery_drawdown'] if levels[idx]['recovery_drawdown'] is not None else 0
+
+                        # Check if current DD is in this level's bracket
+                        # Bracket: [exit_threshold, entry_threshold)
+                        if current_drawdown >= level_exit and current_drawdown < level_entry:
+                            new_level = idx
+                            new_gross = levels[idx]['gross_reduction']
+                            break
+                        # Special case: if DD >= entry threshold, we're in this level
+                        elif current_drawdown >= level_entry:
+                            new_level = idx
+                            new_gross = levels[idx]['gross_reduction']
+                            break
+                    # else: recovered below all levels, stay cleared (new_level = None)
+                else:
+                    # Haven't recovered enough to exit current level
+                    # Check if we should enter a deeper level
+                    for idx in range(current_level + 1, len(levels)):
+                        if current_drawdown >= levels[idx]['drawdown_threshold']:
+                            new_level = idx
+                            new_gross = levels[idx]['gross_reduction']
+                            break
+
+                    # If no deeper level triggered, stay at current level (STICKY)
+                    if new_level is None or new_level < current_level:
+                        new_level = current_level
+                        new_gross = current_level_obj['gross_reduction']
+            else:
+                # No recovery threshold - can only exit at new peak
+                # But check if we should enter deeper level
+                new_level = current_level
+                new_gross = current_level_obj['gross_reduction']
+
+                for idx in range(current_level + 1, len(levels)):
+                    if current_drawdown >= levels[idx]['drawdown_threshold']:
+                        new_level = idx
+                        new_gross = levels[idx]['gross_reduction']
+                        break
 
         # Update state
         current_level = new_level
@@ -187,10 +226,9 @@ def calculate_stop_loss_metrics(
     dates: Optional[Union[pd.DatetimeIndex, List]] = None
 ) -> pd.DataFrame:
     """
-    Calculate detailed stop loss metrics including portfolio values, drawdowns, and gross multipliers.
+    Calculate detailed stop loss metrics using sticky recovery logic.
 
-    This function provides more detailed information than calculate_stop_loss_gross(),
-    returning a DataFrame with all relevant metrics for analysis.
+    Returns a DataFrame with portfolio values, drawdowns, and gross multipliers.
 
     Parameters:
     -----------
@@ -212,18 +250,15 @@ def calculate_stop_loss_metrics(
         DataFrame with columns:
         - portfolio_value: Current portfolio value
         - peak_value: Running peak value
-        - trough_value: Running trough value (during current drawdown)
         - drawdown_dollar: Dollar drawdown from peak
-        - recovery_dollar: Dollar recovery from trough
         - triggered_level: Currently active stop loss level (0-indexed, None if cleared)
         - gross_multiplier: Gross exposure multiplier
 
     Examples:
     ---------
-    >>> daily_pnl = pd.Series([0, 100, -200, -300, 50, 100])
-    >>> levels = [(500, 0.75, 250)]
-    >>> metrics = calculate_stop_loss_metrics(daily_pnl, levels, initial_capital=10000)
-    >>> print(metrics[['portfolio_value', 'drawdown_dollar', 'gross_multiplier']])
+    >>> daily_pnl = pd.Series([0, -5000, -3000, 2000])
+    >>> levels = [(5000, 0.75, 2000), (10000, 0.50, 5000)]
+    >>> metrics = calculate_stop_loss_metrics(daily_pnl, levels, initial_capital=100000)
     """
     # Convert inputs to pandas Series if needed
     if isinstance(daily_pnl, np.ndarray):
@@ -234,21 +269,21 @@ def calculate_stop_loss_metrics(
     elif not isinstance(daily_pnl, pd.Series):
         raise ValueError("daily_pnl must be a pandas Series or numpy array")
 
-    # Parse and validate levels (reuse validation from calculate_stop_loss_gross)
+    # Parse and validate levels (reuse logic from calculate_stop_loss_gross)
     levels = []
     for level_tuple in stop_loss_levels:
         if len(level_tuple) == 2:
             dd_threshold, gross_reduction = level_tuple
-            recovery_threshold = None
+            recovery_drawdown = None
         elif len(level_tuple) == 3:
-            dd_threshold, gross_reduction, recovery_threshold = level_tuple
+            dd_threshold, gross_reduction, recovery_drawdown = level_tuple
         else:
             raise ValueError(f"Stop loss level must be 2-tuple or 3-tuple, got {len(level_tuple)}-tuple")
 
         levels.append({
             'drawdown_threshold': dd_threshold,
             'gross_reduction': gross_reduction,
-            'recovery_threshold': recovery_threshold
+            'recovery_drawdown': recovery_drawdown
         })
 
     levels = sorted(levels, key=lambda x: x['drawdown_threshold'])
@@ -260,62 +295,77 @@ def calculate_stop_loss_metrics(
     results = pd.DataFrame(index=daily_pnl.index)
     results['portfolio_value'] = portfolio_values
     results['peak_value'] = 0.0
-    results['trough_value'] = 0.0
     results['drawdown_dollar'] = 0.0
-    results['recovery_dollar'] = 0.0
     results['triggered_level'] = None
     results['gross_multiplier'] = 1.0
 
     # Track state
     peak_value = initial_capital
-    trough_value = initial_capital
     current_level = None
 
-    # Process each day
+    # Process each day using sticky logic
     for i, (date, pnl) in enumerate(daily_pnl.items()):
         portfolio_value = portfolio_values.iloc[i]
 
         # Update peak if new high
         if portfolio_value > peak_value:
             peak_value = portfolio_value
-            trough_value = portfolio_value
             current_level = None
 
-        # Update trough if new low
-        if portfolio_value < trough_value:
-            trough_value = portfolio_value
-
-        # Calculate current drawdown and recovery
+        # Calculate current drawdown
         current_drawdown = peak_value - portfolio_value
-        current_recovery = portfolio_value - trough_value
 
-        # Determine which level should be active
+        # Determine new level using sticky logic (same as calculate_stop_loss_gross)
         new_level = None
         new_gross = 1.0
 
-        # Check triggers
-        for idx, level in enumerate(levels):
-            if current_drawdown >= level['drawdown_threshold']:
-                new_level = idx
-                new_gross = level['gross_reduction']
+        if current_level is None:
+            for idx, level in enumerate(levels):
+                if current_drawdown >= level['drawdown_threshold']:
+                    new_level = idx
+                    new_gross = level['gross_reduction']
+        else:
+            current_level_obj = levels[current_level]
 
-        # Check recovery
-        if current_level is not None and new_level == current_level:
-            level = levels[current_level]
-            if level['recovery_threshold'] is not None:
-                if current_recovery >= level['recovery_threshold']:
-                    if current_level > 0:
-                        new_level = current_level - 1
-                        new_gross = levels[new_level]['gross_reduction']
-                    else:
-                        new_level = None
-                        new_gross = 1.0
+            if current_level_obj['recovery_drawdown'] is not None:
+                if current_drawdown <= current_level_obj['recovery_drawdown']:
+                    # Exit current level, determine which bracket we're in
+                    for idx in range(len(levels) - 1, -1, -1):
+                        level_entry = levels[idx]['drawdown_threshold']
+                        level_exit = levels[idx]['recovery_drawdown'] if levels[idx]['recovery_drawdown'] is not None else 0
+
+                        # Check if current DD is in this level's bracket
+                        if current_drawdown >= level_exit and current_drawdown < level_entry:
+                            new_level = idx
+                            new_gross = levels[idx]['gross_reduction']
+                            break
+                        elif current_drawdown >= level_entry:
+                            new_level = idx
+                            new_gross = levels[idx]['gross_reduction']
+                            break
+                else:
+                    for idx in range(current_level + 1, len(levels)):
+                        if current_drawdown >= levels[idx]['drawdown_threshold']:
+                            new_level = idx
+                            new_gross = levels[idx]['gross_reduction']
+                            break
+
+                    if new_level is None or new_level < current_level:
+                        new_level = current_level
+                        new_gross = current_level_obj['gross_reduction']
+            else:
+                new_level = current_level
+                new_gross = current_level_obj['gross_reduction']
+
+                for idx in range(current_level + 1, len(levels)):
+                    if current_drawdown >= levels[idx]['drawdown_threshold']:
+                        new_level = idx
+                        new_gross = levels[idx]['gross_reduction']
+                        break
 
         # Store results
         results.iloc[i, results.columns.get_loc('peak_value')] = peak_value
-        results.iloc[i, results.columns.get_loc('trough_value')] = trough_value
         results.iloc[i, results.columns.get_loc('drawdown_dollar')] = current_drawdown
-        results.iloc[i, results.columns.get_loc('recovery_dollar')] = current_recovery
         results.iloc[i, results.columns.get_loc('triggered_level')] = new_level
         results.iloc[i, results.columns.get_loc('gross_multiplier')] = new_gross
 

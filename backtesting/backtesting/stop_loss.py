@@ -99,6 +99,7 @@ class StopLossManager:
         self.current_drawdown_dollar: float = 0.0
         self.current_gross_multiplier: float = 1.0
         self.triggered_level: Optional[int] = None  # Index of currently active level
+        self.last_exited_level: Optional[int] = None  # Track most recently exited level for hysteresis
 
     def update(self, portfolio_value: float) -> Tuple[float, bool]:
         """
@@ -134,6 +135,7 @@ class StopLossManager:
             self.current_drawdown_dollar = 0.0
             self.triggered_level = None
             self.current_gross_multiplier = 1.0
+            self.last_exited_level = None  # Clear last exited level on new peak
             level_changed = old_level is not None
 
             if level_changed:
@@ -149,32 +151,60 @@ class StopLossManager:
         # Calculate current drawdown from peak
         self.current_drawdown_dollar = self.peak_value - portfolio_value
 
-        # Determine level based on current drawdown
-        # Simple logic: find the deepest level whose thresholds bracket the current DD
-        new_triggered_level = None
-        new_gross_multiplier = 1.0
+        # Clear last_exited_level if DD improves below its entry threshold
+        if self.last_exited_level is not None:
+            if self.current_drawdown_dollar < self.levels[self.last_exited_level].drawdown_threshold:
+                self.last_exited_level = None
 
-        # Check all levels from deepest to shallowest
-        for i in range(len(self.levels) - 1, -1, -1):
-            level = self.levels[i]
+        # Determine level using proper hysteresis logic
+        new_triggered_level = self.triggered_level
+        new_gross_multiplier = self.current_gross_multiplier
 
-            # Default recovery_drawdown to drawdown_threshold if not specified
-            recovery_dd = level.recovery_drawdown if level.recovery_drawdown is not None else level.drawdown_threshold
-
-            # Check if current DD is in this level's range
-            # Entry: DD >= drawdown_threshold (worse drawdown, enter level)
-            # Exit: DD < recovery_drawdown (better drawdown, exit level)
-            if self.current_drawdown_dollar >= level.drawdown_threshold:
-                # We're at or past the entry threshold
-                # Check if we should scale up (exit) - only if DD has improved to recovery level
-                if self.current_drawdown_dollar < recovery_dd:
-                    # DD improved past recovery threshold, don't enter this level
-                    continue
-                else:
-                    # DD is still >= recovery threshold, use this level
+        if self.triggered_level is None:
+            # Not at any level - check if we should enter one
+            # For initial entry, use drawdown_threshold
+            for i in range(len(self.levels) - 1, -1, -1):
+                if self.current_drawdown_dollar >= self.levels[i].drawdown_threshold:
                     new_triggered_level = i
-                    new_gross_multiplier = level.gross_reduction
+                    new_gross_multiplier = self.levels[i].gross_reduction
                     break
+        else:
+            # Currently at a level - check for exit or deeper entry
+            current_level_obj = self.levels[self.triggered_level]
+            recovery_dd = current_level_obj.recovery_drawdown if current_level_obj.recovery_drawdown is not None else current_level_obj.drawdown_threshold
+
+            # Exit when DD < recovery_drawdown (improved below recovery threshold)
+            if self.current_drawdown_dollar < recovery_dd:
+                # Exiting current level - track it for hysteresis
+                self.last_exited_level = self.triggered_level
+
+                # Check if we enter a shallower level
+                new_triggered_level = None
+                new_gross_multiplier = 1.0
+
+                for i in range(self.triggered_level - 1, -1, -1):
+                    level_recovery = self.levels[i].recovery_drawdown if self.levels[i].recovery_drawdown is not None else self.levels[i].drawdown_threshold
+                    if self.current_drawdown_dollar >= level_recovery:
+                        new_triggered_level = i
+                        new_gross_multiplier = self.levels[i].gross_reduction
+                        break
+            else:
+                # Still at current level (DD >= recovery_drawdown)
+                # Check if we should enter a deeper level
+                for i in range(self.triggered_level + 1, len(self.levels)):
+                    # If this is the level we just exited, need DD >= recovery_drawdown (hysteresis)
+                    # Otherwise, use drawdown_threshold for entry
+                    if i == self.last_exited_level:
+                        threshold = self.levels[i].recovery_drawdown if self.levels[i].recovery_drawdown is not None else self.levels[i].drawdown_threshold
+                    else:
+                        threshold = self.levels[i].drawdown_threshold
+
+                    if self.current_drawdown_dollar >= threshold:
+                        new_triggered_level = i
+                        new_gross_multiplier = self.levels[i].gross_reduction
+                        # Clear last_exited_level when we enter a deeper level
+                        self.last_exited_level = None
+                        break
 
         # Check if level changed
         level_changed = new_triggered_level != self.triggered_level
@@ -274,3 +304,4 @@ class StopLossManager:
         self.current_drawdown_dollar = 0.0
         self.current_gross_multiplier = 1.0
         self.triggered_level = None
+        self.last_exited_level = None

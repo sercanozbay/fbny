@@ -138,6 +138,7 @@ def calculate_stop_loss_gross(
     # Track state
     peak_value = initial_capital
     current_level = None  # Index of currently triggered level (None = no stop loss)
+    last_exited_level = None  # Track most recently exited level for hysteresis
 
     # Process each day using sticky recovery logic
     for i, (date, pnl) in enumerate(daily_pnl.items()):
@@ -147,38 +148,67 @@ def calculate_stop_loss_gross(
         if portfolio_value > peak_value:
             peak_value = portfolio_value
             current_level = None
+            last_exited_level = None  # Clear last exited level on new peak
             gross_multipliers.iloc[i] = 1.0
             continue
 
         # Calculate current drawdown from peak
         current_drawdown = peak_value - portfolio_value
 
-        # Determine level based on current drawdown
-        # Simple logic: find the deepest level whose thresholds bracket the current DD
-        new_level = None
-        new_gross = 1.0
+        # Clear last_exited_level if DD improves below its entry threshold
+        if last_exited_level is not None:
+            if current_drawdown < levels[last_exited_level]['drawdown_threshold']:
+                last_exited_level = None
 
-        # Check all levels from deepest to shallowest
-        for idx in range(len(levels) - 1, -1, -1):
-            level = levels[idx]
+        # Determine level using proper hysteresis logic
+        new_level = current_level
+        new_gross = gross_multipliers.iloc[i-1] if i > 0 else 1.0
 
-            # Default recovery_drawdown to drawdown_threshold if not specified
-            recovery_dd = level['recovery_drawdown'] if level['recovery_drawdown'] is not None else level['drawdown_threshold']
-
-            # Check if current DD is in this level's range
-            # Entry: DD >= drawdown_threshold (worse drawdown, enter level)
-            # Exit: DD < recovery_drawdown (better drawdown, exit level)
-            if current_drawdown >= level['drawdown_threshold']:
-                # We're at or past the entry threshold
-                # Check if we should scale up (exit) - only if DD has improved to recovery level
-                if current_drawdown < recovery_dd:
-                    # DD improved past recovery threshold, don't enter this level
-                    continue
-                else:
-                    # DD is still >= recovery threshold, use this level
+        if current_level is None:
+            # Not at any level - check if we should enter one
+            # For initial entry, use drawdown_threshold
+            for idx in range(len(levels) - 1, -1, -1):
+                if current_drawdown >= levels[idx]['drawdown_threshold']:
                     new_level = idx
-                    new_gross = level['gross_reduction']
+                    new_gross = levels[idx]['gross_reduction']
                     break
+        else:
+            # Currently at a level - check for exit or deeper entry
+            current_level_obj = levels[current_level]
+            recovery_dd = current_level_obj['recovery_drawdown'] if current_level_obj['recovery_drawdown'] is not None else current_level_obj['drawdown_threshold']
+
+            # Exit when DD < recovery_drawdown (improved below recovery threshold)
+            if current_drawdown < recovery_dd:
+                # Exiting current level - track it for hysteresis
+                last_exited_level = current_level
+
+                # Check if we enter a shallower level
+                new_level = None
+                new_gross = 1.0
+
+                for idx in range(current_level - 1, -1, -1):
+                    level_recovery = levels[idx]['recovery_drawdown'] if levels[idx]['recovery_drawdown'] is not None else levels[idx]['drawdown_threshold']
+                    if current_drawdown >= level_recovery:
+                        new_level = idx
+                        new_gross = levels[idx]['gross_reduction']
+                        break
+            else:
+                # Still at current level (DD >= recovery_drawdown)
+                # Check if we should enter a deeper level
+                for idx in range(current_level + 1, len(levels)):
+                    # If this is the level we just exited, need DD >= recovery_drawdown (hysteresis)
+                    # Otherwise, use drawdown_threshold for entry
+                    if idx == last_exited_level:
+                        threshold = levels[idx]['recovery_drawdown'] if levels[idx]['recovery_drawdown'] is not None else levels[idx]['drawdown_threshold']
+                    else:
+                        threshold = levels[idx]['drawdown_threshold']
+
+                    if current_drawdown >= threshold:
+                        new_level = idx
+                        new_gross = levels[idx]['gross_reduction']
+                        # Clear last_exited_level when we enter a deeper level
+                        last_exited_level = None
+                        break
 
         # Update state
         current_level = new_level
@@ -270,6 +300,7 @@ def calculate_stop_loss_metrics(
     # Track state
     peak_value = initial_capital
     current_level = None
+    last_exited_level = None  # Track most recently exited level for hysteresis
 
     # Process each day using sticky logic
     for i, (date, pnl) in enumerate(daily_pnl.items()):
@@ -279,31 +310,65 @@ def calculate_stop_loss_metrics(
         if portfolio_value > peak_value:
             peak_value = portfolio_value
             current_level = None
+            last_exited_level = None  # Clear last exited level on new peak
 
         # Calculate current drawdown
         current_drawdown = peak_value - portfolio_value
 
-        # Determine level based on current drawdown (same as calculate_stop_loss_gross)
-        new_level = None
-        new_gross = 1.0
+        # Clear last_exited_level if DD improves below its entry threshold
+        if last_exited_level is not None:
+            if current_drawdown < levels[last_exited_level]['drawdown_threshold']:
+                last_exited_level = None
 
-        # Check all levels from deepest to shallowest
-        for idx in range(len(levels) - 1, -1, -1):
-            level = levels[idx]
+        # Determine level using proper hysteresis logic (same as calculate_stop_loss_gross)
+        new_level = current_level
+        new_gross = results.iloc[i-1, results.columns.get_loc('gross_multiplier')] if i > 0 else 1.0
 
-            # Default recovery_drawdown to drawdown_threshold if not specified
-            recovery_dd = level['recovery_drawdown'] if level['recovery_drawdown'] is not None else level['drawdown_threshold']
-
-            # Check if current DD is in this level's range
-            if current_drawdown >= level['drawdown_threshold']:
-                if current_drawdown < recovery_dd:
-                    # DD improved past recovery threshold, don't enter this level
-                    continue
-                else:
-                    # DD is still >= recovery threshold, use this level
+        if current_level is None:
+            # Not at any level - check if we should enter one
+            # For initial entry, use drawdown_threshold
+            for idx in range(len(levels) - 1, -1, -1):
+                if current_drawdown >= levels[idx]['drawdown_threshold']:
                     new_level = idx
-                    new_gross = level['gross_reduction']
+                    new_gross = levels[idx]['gross_reduction']
                     break
+        else:
+            # Currently at a level - check for exit or deeper entry
+            current_level_obj = levels[current_level]
+            recovery_dd = current_level_obj['recovery_drawdown'] if current_level_obj['recovery_drawdown'] is not None else current_level_obj['drawdown_threshold']
+
+            # Exit when DD < recovery_drawdown (improved below recovery threshold)
+            if current_drawdown < recovery_dd:
+                # Exiting current level - track it for hysteresis
+                last_exited_level = current_level
+
+                # Check if we enter a shallower level
+                new_level = None
+                new_gross = 1.0
+
+                for idx in range(current_level - 1, -1, -1):
+                    level_recovery = levels[idx]['recovery_drawdown'] if levels[idx]['recovery_drawdown'] is not None else levels[idx]['drawdown_threshold']
+                    if current_drawdown >= level_recovery:
+                        new_level = idx
+                        new_gross = levels[idx]['gross_reduction']
+                        break
+            else:
+                # Still at current level (DD >= recovery_drawdown)
+                # Check if we should enter a deeper level
+                for idx in range(current_level + 1, len(levels)):
+                    # If this is the level we just exited, need DD >= recovery_drawdown (hysteresis)
+                    # Otherwise, use drawdown_threshold for entry
+                    if idx == last_exited_level:
+                        threshold = levels[idx]['recovery_drawdown'] if levels[idx]['recovery_drawdown'] is not None else levels[idx]['drawdown_threshold']
+                    else:
+                        threshold = levels[idx]['drawdown_threshold']
+
+                    if current_drawdown >= threshold:
+                        new_level = idx
+                        new_gross = levels[idx]['gross_reduction']
+                        # Clear last_exited_level when we enter a deeper level
+                        last_exited_level = None
+                        break
 
         # Store results
         results.iloc[i, results.columns.get_loc('peak_value')] = peak_value

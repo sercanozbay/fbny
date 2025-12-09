@@ -26,11 +26,11 @@ class StopLossLevel:
         Target gross exposure as a percentage (e.g., 0.5 means reduce to 50% of normal gross)
 
     recovery_drawdown : Optional[float]
-        Dollar drawdown from peak that triggers exit (recovery) from this level.
-        Must be less than drawdown_threshold.
-        Example: If drawdown_threshold=10000 and recovery_drawdown=7500,
-                 enter at $10k loss, exit when drawdown improves to $7.5k
-        If None, can only exit by reaching a new peak (drawdown=0)
+        Dollar drawdown from peak that triggers exit (scale up) from this level.
+        Must be GREATER than drawdown_threshold to scale up early during recovery.
+        Example: If drawdown_threshold=10000 and recovery_drawdown=15000,
+                 enter at $10k DD, scale up when DD reaches $15k (worse DD = recovering from even deeper loss)
+        If None, defaults to drawdown_threshold (immediate scale up when DD improves)
     """
     drawdown_threshold: float
     gross_reduction: float
@@ -46,10 +46,11 @@ class StopLossLevel:
         if self.recovery_drawdown is not None:
             if self.recovery_drawdown < 0:
                 raise ValueError(f"Recovery drawdown must be non-negative, got {self.recovery_drawdown}")
-            if self.recovery_drawdown >= self.drawdown_threshold:
+            if self.recovery_drawdown <= self.drawdown_threshold:
                 raise ValueError(
-                    f"Recovery drawdown ({self.recovery_drawdown}) must be less than "
-                    f"drawdown threshold ({self.drawdown_threshold})"
+                    f"Recovery drawdown ({self.recovery_drawdown}) must be greater than "
+                    f"drawdown threshold ({self.drawdown_threshold}). "
+                    f"Use None to default to drawdown_threshold for immediate scale up."
                 )
 
 
@@ -148,63 +149,32 @@ class StopLossManager:
         # Calculate current drawdown from peak
         self.current_drawdown_dollar = self.peak_value - portfolio_value
 
-        # Determine new level using sticky logic
+        # Determine level based on current drawdown
+        # Simple logic: find the deepest level whose thresholds bracket the current DD
         new_triggered_level = None
         new_gross_multiplier = 1.0
 
-        if self.triggered_level is None:
-            # Not currently at any level - check if we should enter one
-            for i, level in enumerate(self.levels):
-                if self.current_drawdown_dollar >= level.drawdown_threshold:
+        # Check all levels from deepest to shallowest
+        for i in range(len(self.levels) - 1, -1, -1):
+            level = self.levels[i]
+
+            # Default recovery_drawdown to drawdown_threshold if not specified
+            recovery_dd = level.recovery_drawdown if level.recovery_drawdown is not None else level.drawdown_threshold
+
+            # Check if current DD is in this level's range
+            # Entry: DD >= drawdown_threshold (worse drawdown, enter level)
+            # Exit: DD < recovery_drawdown (better drawdown, exit level)
+            if self.current_drawdown_dollar >= level.drawdown_threshold:
+                # We're at or past the entry threshold
+                # Check if we should scale up (exit) - only if DD has improved to recovery level
+                if self.current_drawdown_dollar < recovery_dd:
+                    # DD improved past recovery threshold, don't enter this level
+                    continue
+                else:
+                    # DD is still >= recovery threshold, use this level
                     new_triggered_level = i
                     new_gross_multiplier = level.gross_reduction
-        else:
-            # Currently at a level - sticky logic
-            current_level_obj = self.levels[self.triggered_level]
-
-            # Check if we should exit current level (recover to less restrictive)
-            if current_level_obj.recovery_drawdown is not None:
-                if self.current_drawdown_dollar <= current_level_obj.recovery_drawdown:
-                    # Exit current level, determine which bracket we're in
-                    # Start from the deepest level and find the first bracket we fall into
-                    for i in range(len(self.levels) - 1, -1, -1):
-                        level_entry = self.levels[i].drawdown_threshold
-                        level_exit = self.levels[i].recovery_drawdown if self.levels[i].recovery_drawdown is not None else 0
-
-                        # Check if current DD is in this level's bracket
-                        # Bracket: [exit_threshold, entry_threshold)
-                        if self.current_drawdown_dollar >= level_exit and self.current_drawdown_dollar < level_entry:
-                            new_triggered_level = i
-                            new_gross_multiplier = self.levels[i].gross_reduction
-                            break
-                        # Special case: if DD >= entry threshold, we're in this level
-                        elif self.current_drawdown_dollar >= level_entry:
-                            new_triggered_level = i
-                            new_gross_multiplier = self.levels[i].gross_reduction
-                            break
-                    # else: recovered below all levels, stay cleared (new_triggered_level = None)
-                else:
-                    # Haven't recovered enough to exit current level
-                    # Check if we should enter a deeper level
-                    for i in range(self.triggered_level + 1, len(self.levels)):
-                        if self.current_drawdown_dollar >= self.levels[i].drawdown_threshold:
-                            new_triggered_level = i
-                            new_gross_multiplier = self.levels[i].gross_reduction
-
-                    # If no deeper level triggered, stay at current level
-                    if new_triggered_level is None or new_triggered_level == self.triggered_level:
-                        new_triggered_level = self.triggered_level
-                        new_gross_multiplier = current_level_obj.gross_reduction
-            else:
-                # No recovery threshold - can only exit at new peak
-                # But check if we should enter deeper level
-                new_triggered_level = self.triggered_level
-                new_gross_multiplier = current_level_obj.gross_reduction
-
-                for i in range(self.triggered_level + 1, len(self.levels)):
-                    if self.current_drawdown_dollar >= self.levels[i].drawdown_threshold:
-                        new_triggered_level = i
-                        new_gross_multiplier = self.levels[i].gross_reduction
+                    break
 
         # Check if level changed
         level_changed = new_triggered_level != self.triggered_level

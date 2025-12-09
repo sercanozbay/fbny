@@ -65,30 +65,30 @@ class BacktestConfig:
     #   - 2-tuple: (drawdown_threshold, gross_reduction) - no automatic recovery
     #   - 3-tuple: (drawdown_threshold, gross_reduction, recovery_drawdown)
     #
-    # drawdown_threshold: Dollar drawdown from peak that ENTERS this level (e.g., 10000 = enter at $10k loss)
+    # drawdown_threshold: Dollar drawdown from peak that ENTERS this level (e.g., 10000 = enter at $10k DD)
     # gross_reduction: Target gross exposure as percentage (e.g., 0.75 = 75% of normal gross)
-    # recovery_drawdown: Dollar drawdown from peak that EXITS this level (optional, must be < drawdown_threshold)
+    # recovery_drawdown: Dollar drawdown from peak that EXITS this level (optional, must be > drawdown_threshold)
+    #                    Defaults to drawdown_threshold if not specified (immediate scale up)
     #
-    # STICKY RECOVERY: Once at a level, stay there until drawdown improves past recovery_drawdown
+    # LOGIC: Scale up early during recovery to recoup losses faster
     #
     # Examples:
-    #   Without recovery:
+    #   Without recovery (immediate scale up):
     #     [(5000, 0.75), (10000, 0.50)] means:
-    #       - At $5k drawdown, reduce gross to 75% (stay until new peak)
-    #       - At $10k drawdown, reduce gross to 50% (stay until new peak)
+    #       - Enter at $5k DD → 75% gross, exit when DD < $5k (immediate)
+    #       - Enter at $10k DD → 50% gross, exit when DD < $10k (immediate)
     #
-    #   With recovery (RECOMMENDED):
-    #     [(5000, 0.75, 2500), (10000, 0.50, 5000), (15000, 0.25, 10000)] means:
-    #       - Enter at $5k drawdown → 75% gross, exit when drawdown ≤ $2.5k
-    #       - Enter at $10k drawdown → 50% gross, exit when drawdown ≤ $5k (back to 75%)
-    #       - Enter at $15k drawdown → 25% gross, exit when drawdown ≤ $10k (back to 50%)
+    #   With recovery (scale up early):
+    #     [(5000, 0.75, 7500), (10000, 0.50, 15000)] means:
+    #       - Enter at $5k DD → 75% gross, scale up when DD reaches $7.5k (worse DD)
+    #       - Enter at $10k DD → 50% gross, scale up when DD reaches $15k (worse DD)
     #
     #     Recovery sequence example:
-    #       Portfolio: $100k → $85k (15k DD) → triggers 25% gross
-    #       Portfolio: $85k → $95k (5k DD) → stays at 25% (DD > $10k recovery threshold)
-    #       Portfolio: $95k → $91k (9k DD) → recovers to 50% gross (DD ≤ $10k recovery)
-    #       Portfolio: $91k → $96k (4k DD) → recovers to 75% gross (DD ≤ $5k recovery)
-    #       Portfolio: $96k → $102k (0k DD) → fully cleared at new peak
+    #       Portfolio: $100k → $85k (15k DD) → triggers 50% gross (DD ≥ $10k entry)
+    #       Portfolio: $85k → $88k (12k DD) → stays at 50% (DD < $15k recovery, still ≥ $10k)
+    #       Portfolio: $88k → $94k (6k DD) → scales up to 75% (DD < $10k entry, ≥ $5k entry)
+    #       Portfolio: $94k → $96k (4k DD) → scales up to 100% (DD < $5k entry)
+    #       Portfolio: $96k → $102k (new peak) → fully cleared
 
     def __post_init__(self):
         """Validate configuration."""
@@ -122,10 +122,11 @@ class BacktestConfig:
                 if recovery_drawdown is not None:
                     if recovery_drawdown < 0:
                         raise ValueError(f"Recovery drawdown must be non-negative, got {recovery_drawdown}")
-                    if recovery_drawdown >= dd_threshold:
+                    if recovery_drawdown <= dd_threshold:
                         raise ValueError(
-                            f"Recovery drawdown ({recovery_drawdown}) must be less than "
-                            f"drawdown threshold ({dd_threshold})"
+                            f"Recovery drawdown ({recovery_drawdown}) must be greater than "
+                            f"drawdown threshold ({dd_threshold}). "
+                            f"Use None to default to drawdown_threshold for immediate scale up."
                         )
 
 

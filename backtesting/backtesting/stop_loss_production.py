@@ -104,10 +104,11 @@ def calculate_stop_loss_gross(
         if recovery_drawdown is not None:
             if recovery_drawdown < 0:
                 raise ValueError(f"Recovery drawdown must be non-negative, got {recovery_drawdown}")
-            if recovery_drawdown >= dd_threshold:
+            if recovery_drawdown <= dd_threshold:
                 raise ValueError(
-                    f"Recovery drawdown ({recovery_drawdown}) must be less than "
-                    f"drawdown threshold ({dd_threshold})"
+                    f"Recovery drawdown ({recovery_drawdown}) must be greater than "
+                    f"drawdown threshold ({dd_threshold}). "
+                    f"Use None to default to drawdown_threshold for immediate scale up."
                 )
 
         levels.append({
@@ -152,65 +153,32 @@ def calculate_stop_loss_gross(
         # Calculate current drawdown from peak
         current_drawdown = peak_value - portfolio_value
 
-        # Determine new level using sticky logic
+        # Determine level based on current drawdown
+        # Simple logic: find the deepest level whose thresholds bracket the current DD
         new_level = None
         new_gross = 1.0
 
-        if current_level is None:
-            # Not currently at any level - check if we should enter one
-            for idx, level in enumerate(levels):
-                if current_drawdown >= level['drawdown_threshold']:
+        # Check all levels from deepest to shallowest
+        for idx in range(len(levels) - 1, -1, -1):
+            level = levels[idx]
+
+            # Default recovery_drawdown to drawdown_threshold if not specified
+            recovery_dd = level['recovery_drawdown'] if level['recovery_drawdown'] is not None else level['drawdown_threshold']
+
+            # Check if current DD is in this level's range
+            # Entry: DD >= drawdown_threshold (worse drawdown, enter level)
+            # Exit: DD < recovery_drawdown (better drawdown, exit level)
+            if current_drawdown >= level['drawdown_threshold']:
+                # We're at or past the entry threshold
+                # Check if we should scale up (exit) - only if DD has improved to recovery level
+                if current_drawdown < recovery_dd:
+                    # DD improved past recovery threshold, don't enter this level
+                    continue
+                else:
+                    # DD is still >= recovery threshold, use this level
                     new_level = idx
                     new_gross = level['gross_reduction']
-        else:
-            # Currently at a level - sticky logic
-            current_level_obj = levels[current_level]
-
-            # Check if we should exit current level (recover to less restrictive)
-            if current_level_obj['recovery_drawdown'] is not None:
-                if current_drawdown <= current_level_obj['recovery_drawdown']:
-                    # Exit current level, determine which bracket we're in
-                    # Start from the deepest level and find the first bracket we fall into
-                    for idx in range(len(levels) - 1, -1, -1):
-                        level_entry = levels[idx]['drawdown_threshold']
-                        level_exit = levels[idx]['recovery_drawdown'] if levels[idx]['recovery_drawdown'] is not None else 0
-
-                        # Check if current DD is in this level's bracket
-                        # Bracket: [exit_threshold, entry_threshold)
-                        if current_drawdown >= level_exit and current_drawdown < level_entry:
-                            new_level = idx
-                            new_gross = levels[idx]['gross_reduction']
-                            break
-                        # Special case: if DD >= entry threshold, we're in this level
-                        elif current_drawdown >= level_entry:
-                            new_level = idx
-                            new_gross = levels[idx]['gross_reduction']
-                            break
-                    # else: recovered below all levels, stay cleared (new_level = None)
-                else:
-                    # Haven't recovered enough to exit current level
-                    # Check if we should enter a deeper level
-                    for idx in range(current_level + 1, len(levels)):
-                        if current_drawdown >= levels[idx]['drawdown_threshold']:
-                            new_level = idx
-                            new_gross = levels[idx]['gross_reduction']
-                            break
-
-                    # If no deeper level triggered, stay at current level (STICKY)
-                    if new_level is None or new_level < current_level:
-                        new_level = current_level
-                        new_gross = current_level_obj['gross_reduction']
-            else:
-                # No recovery threshold - can only exit at new peak
-                # But check if we should enter deeper level
-                new_level = current_level
-                new_gross = current_level_obj['gross_reduction']
-
-                for idx in range(current_level + 1, len(levels)):
-                    if current_drawdown >= levels[idx]['drawdown_threshold']:
-                        new_level = idx
-                        new_gross = levels[idx]['gross_reduction']
-                        break
+                    break
 
         # Update state
         current_level = new_level
@@ -315,53 +283,27 @@ def calculate_stop_loss_metrics(
         # Calculate current drawdown
         current_drawdown = peak_value - portfolio_value
 
-        # Determine new level using sticky logic (same as calculate_stop_loss_gross)
+        # Determine level based on current drawdown (same as calculate_stop_loss_gross)
         new_level = None
         new_gross = 1.0
 
-        if current_level is None:
-            for idx, level in enumerate(levels):
-                if current_drawdown >= level['drawdown_threshold']:
+        # Check all levels from deepest to shallowest
+        for idx in range(len(levels) - 1, -1, -1):
+            level = levels[idx]
+
+            # Default recovery_drawdown to drawdown_threshold if not specified
+            recovery_dd = level['recovery_drawdown'] if level['recovery_drawdown'] is not None else level['drawdown_threshold']
+
+            # Check if current DD is in this level's range
+            if current_drawdown >= level['drawdown_threshold']:
+                if current_drawdown < recovery_dd:
+                    # DD improved past recovery threshold, don't enter this level
+                    continue
+                else:
+                    # DD is still >= recovery threshold, use this level
                     new_level = idx
                     new_gross = level['gross_reduction']
-        else:
-            current_level_obj = levels[current_level]
-
-            if current_level_obj['recovery_drawdown'] is not None:
-                if current_drawdown <= current_level_obj['recovery_drawdown']:
-                    # Exit current level, determine which bracket we're in
-                    for idx in range(len(levels) - 1, -1, -1):
-                        level_entry = levels[idx]['drawdown_threshold']
-                        level_exit = levels[idx]['recovery_drawdown'] if levels[idx]['recovery_drawdown'] is not None else 0
-
-                        # Check if current DD is in this level's bracket
-                        if current_drawdown >= level_exit and current_drawdown < level_entry:
-                            new_level = idx
-                            new_gross = levels[idx]['gross_reduction']
-                            break
-                        elif current_drawdown >= level_entry:
-                            new_level = idx
-                            new_gross = levels[idx]['gross_reduction']
-                            break
-                else:
-                    for idx in range(current_level + 1, len(levels)):
-                        if current_drawdown >= levels[idx]['drawdown_threshold']:
-                            new_level = idx
-                            new_gross = levels[idx]['gross_reduction']
-                            break
-
-                    if new_level is None or new_level < current_level:
-                        new_level = current_level
-                        new_gross = current_level_obj['gross_reduction']
-            else:
-                new_level = current_level
-                new_gross = current_level_obj['gross_reduction']
-
-                for idx in range(current_level + 1, len(levels)):
-                    if current_drawdown >= levels[idx]['drawdown_threshold']:
-                        new_level = idx
-                        new_gross = levels[idx]['gross_reduction']
-                        break
+                    break
 
         # Store results
         results.iloc[i, results.columns.get_loc('peak_value')] = peak_value

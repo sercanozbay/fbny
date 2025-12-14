@@ -100,20 +100,11 @@ class Backtester:
         if config.stop_loss_levels is not None:
             levels = []
             for level_tuple in config.stop_loss_levels:
-                if len(level_tuple) == 2:
-                    dd, gr = level_tuple
-                    levels.append(StopLossLevel(
-                        drawdown_threshold=dd,
-                        gross_reduction=gr,
-                        recovery_drawdown=None
-                    ))
-                elif len(level_tuple) == 3:
-                    dd, gr, recovery_dd = level_tuple
-                    levels.append(StopLossLevel(
-                        drawdown_threshold=dd,
-                        gross_reduction=gr,
-                        recovery_drawdown=recovery_dd
-                    ))
+                dd, gr = level_tuple
+                levels.append(StopLossLevel(
+                    drawdown_threshold=dd,
+                    gross_reduction=gr
+                ))
             self.stop_loss_manager = StopLossManager(levels)
 
         # State

@@ -27,6 +27,12 @@ A comprehensive, production-ready backtesting framework for portfolio strategies
   - Sector exposure hedging
   - Configurable target exposures
 
+- **Stop Loss:**
+  - Dollar-based drawdown thresholds
+  - Multiple graduated levels
+  - Automatic gross exposure reduction
+  - Immediate exit on recovery
+
 - **Optimization:**
   - Minimize transaction costs subject to constraints
   - Factor exposure limits
@@ -371,6 +377,10 @@ BacktestConfig(
     use_float32=True,              # Use float32 for memory
     risk_free_rate=0.0,            # Annual risk-free rate
 
+    # Stop loss (use cases 1 and 2 only)
+    stop_loss_levels=None,         # List[Tuple[float, float]]: (threshold, gross_reduction)
+                                   # Example: [(5000, 0.75), (10000, 0.50)]
+
     # Initial state
     initial_cash=10_000_000,       # Starting cash
     initial_positions=None         # Dict[str, float]: initial holdings
@@ -459,6 +469,15 @@ The framework calculates:
 - Tracking error
 - Information ratio
 - Up/down capture ratios
+
+## Documentation
+
+### Detailed Guides
+- [Stop Loss Guide](docs/STOP_LOSS_GUIDE.md) - Comprehensive stop loss documentation
+- [External Trade Tags](docs/EXTERNAL_TRADE_TAGS.md) - Trade attribution and tagging
+- [PDF Reports](docs/PDF_REPORTS.md) - Report generation
+- [NA Handling](docs/NA_HANDLING_GUIDE.md) - Missing data strategies
+- [Quickstart Guide](docs/QUICKSTART.md) - Getting started
 
 ## Examples
 
